@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { VersionDisplay } from './VersionDisplay';
 
 interface SidebarProps {
   currentPage: string;
@@ -61,9 +62,14 @@ export function Sidebar({ currentPage, onNavigate, isOpen, onClose }: SidebarPro
       <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <a href="/" className="logo">
-            <img src="/logo_full.png" alt="Home Registry" />
+            <img 
+              src="/logo_full.png" 
+              alt="Home Registry" 
+            />
           </a>
         </div>
+
+        <VersionDisplay />
 
         <nav className="nav-menu">
           <div className="nav-section">

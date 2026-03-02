@@ -18,3 +18,5 @@ export { BackupRestoreSection } from './BackupRestoreSection';
 export { InstructionsModal } from './InstructionsModal';
 export { ImageLightbox } from './ImageLightbox';
 export { ImageOrganizerInput } from './ImageOrganizerInput';
+export { AboutDialog } from './AboutDialog';
+export { VersionDisplay } from './VersionDisplay';

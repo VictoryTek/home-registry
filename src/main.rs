@@ -277,6 +277,22 @@ async fn main() -> std::io::Result<()> {
                             .insert_header(("Cache-Control", "public, max-age=86400"))
                     })
             }))
+            .route("/logo_full2.png", web::get().to(|| async {
+                fs::NamedFile::open_async("static/logo_full2.png")
+                    .await
+                    .map(|file| {
+                        file.customize()
+                            .insert_header(("Cache-Control", "public, max-age=86400"))
+                    })
+            }))
+            .route("/logo_full3.png", web::get().to(|| async {
+                fs::NamedFile::open_async("static/logo_full3.png")
+                    .await
+                    .map(|file| {
+                        file.customize()
+                            .insert_header(("Cache-Control", "public, max-age=86400"))
+                    })
+            }))
             .route("/logo_icon3.png", web::get().to(|| async {
                 fs::NamedFile::open_async("static/logo_icon3.png")
                     .await

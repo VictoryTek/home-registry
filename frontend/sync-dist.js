@@ -68,6 +68,8 @@ async function syncFrontend() {
     const publicAssets = [
       'logo_icon.png',
       'logo_full.png',
+      'logo_full2.png',
+      'logo_full3.png',
       'logo_icon3.png',
       'favicon.ico'
     ];
