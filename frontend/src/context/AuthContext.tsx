@@ -194,6 +194,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     sessionStorage.removeItem('home_registry_instructions_dismissed');
+    // Clear auto-navigation flag so default inventory navigation works on next login
+    sessionStorage.removeItem('home_registry_auto_navigated');
     setToken(null);
     setUser(null);
     setSettings(null);

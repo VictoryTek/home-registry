@@ -1562,10 +1562,18 @@ impl DatabaseService {
             values.push(theme);
             param_count += 1;
         }
-        if let Some(ref default_inventory_id) = request.default_inventory_id {
-            fields.push(format!("default_inventory_id = ${param_count}"));
-            values.push(default_inventory_id);
-            param_count += 1;
+        // BUG FIX: Handle special sentinel value 0 as "set to NULL" to allow clearing the setting.
+        // Frontend sends 0 when user selects "None" to avoid JSON serialization issues with undefined.
+        if let Some(ref default_inventory_id_value) = request.default_inventory_id {
+            if *default_inventory_id_value == 0 {
+                // Special case: 0 means clear the default inventory setting
+                fields.push("default_inventory_id = NULL".to_string());
+                // No parameter needed - NULL is inline in SQL
+            } else {
+                fields.push(format!("default_inventory_id = ${param_count}"));
+                values.push(default_inventory_id_value);
+                param_count += 1;
+            }
         }
         if let Some(ref items_per_page) = request.items_per_page {
             fields.push(format!("items_per_page = ${param_count}"));

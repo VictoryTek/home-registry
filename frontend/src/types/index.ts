@@ -239,7 +239,7 @@ export interface UserSettings {
   id: string;
   user_id: string;
   theme: string;
-  default_inventory_id?: number;
+  default_inventory_id?: number | null; // Allow null to represent "no default"
   items_per_page: number;
   date_format: string;
   currency: string;
@@ -288,7 +288,7 @@ export interface ChangePasswordRequest {
 
 export interface UpdateUserSettingsRequest {
   theme?: string;
-  default_inventory_id?: number;
+  default_inventory_id?: number | null; // Allow null to explicitly clear the setting
   items_per_page?: number;
   date_format?: string;
   currency?: string;

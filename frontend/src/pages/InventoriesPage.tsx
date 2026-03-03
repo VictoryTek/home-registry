@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Header, LoadingState, EmptyState, Modal, ConfirmModal } from '@/components';
 import { inventoryApi } from '@/services/api';
@@ -20,7 +20,6 @@ export function InventoriesPage() {
   const { showToast, inventories, setInventories, setItems } = useApp();
   const { settings, user } = useAuth();
   const [loading, setLoading] = useState(true);
-  const hasAutoNavigated = useRef(false);
   const [itemCounts, setItemCounts] = useState<Record<number, number>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -96,18 +95,19 @@ export function InventoriesPage() {
     void loadInventories();
   }, [loadInventories]);
 
-  // Auto-navigate to default inventory if set
+  // Auto-navigate to default inventory if set (only on initial page load)
+  // BUG FIX: Use sessionStorage instead of ref to persist flag across component remounts.
+  // This prevents redirect loops when navigating back to inventories list from detail page.
   useEffect(() => {
-    if (
-      !loading &&
-      !hasAutoNavigated.current &&
-      settings?.default_inventory_id &&
-      inventories.length > 0
-    ) {
+    // Check if auto-navigation has already occurred in this session
+    const hasAutoNavigated = sessionStorage.getItem('home_registry_auto_navigated') === 'true';
+
+    if (!loading && !hasAutoNavigated && settings?.default_inventory_id && inventories.length > 0) {
       // Check if the default inventory exists
       const defaultInventory = inventories.find((inv) => inv.id === settings.default_inventory_id);
       if (defaultInventory) {
-        hasAutoNavigated.current = true;
+        // Mark that auto-navigation has occurred (persists across component unmount/remount)
+        sessionStorage.setItem('home_registry_auto_navigated', 'true');
         navigate(`/inventory/${settings.default_inventory_id}`);
       }
     }
@@ -318,13 +318,6 @@ export function InventoriesPage() {
               <i className="fas fa-plus"></i>
               Create Inventory
             </button>
-            {settings?.default_inventory_id && (
-              <span
-                style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginLeft: '1rem' }}
-              >
-                <i className="fas fa-info-circle"></i> Default inventory is set to auto-open
-              </span>
-            )}
           </div>
 
           {loading ? (

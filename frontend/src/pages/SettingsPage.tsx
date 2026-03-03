@@ -35,10 +35,12 @@ export function SettingsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
+  // BUG FIX: Use 0 as sentinel value for "no default inventory" instead of undefined.
+  // undefined gets omitted from JSON serialization, preventing backend from clearing the setting.
   const [form, setForm] = useState({
     date_format: 'MM/DD/YYYY',
     currency: 'USD',
-    default_inventory_id: undefined as number | undefined,
+    default_inventory_id: 0 as number,
     notifications_enabled: true,
   });
 
@@ -69,7 +71,8 @@ export function SettingsPage() {
       setForm({
         date_format: settings.date_format || 'MM/DD/YYYY',
         currency: settings.currency || 'USD',
-        default_inventory_id: settings.default_inventory_id,
+        // Convert null/undefined from backend to 0 (our sentinel value)
+        default_inventory_id: settings.default_inventory_id ?? 0,
         notifications_enabled: settings.notifications_enabled,
       });
     }
@@ -78,6 +81,7 @@ export function SettingsPage() {
   const handleSave = async () => {
     setIsSaving(true);
     try {
+      // Send form.default_inventory_id directly - backend interprets 0 as "clear setting"
       const success = await updateSettings({
         date_format: form.date_format,
         currency: form.currency,
@@ -102,7 +106,8 @@ export function SettingsPage() {
     settings &&
     (form.date_format !== (settings.date_format || 'MM/DD/YYYY') ||
       form.currency !== (settings.currency || 'USD') ||
-      form.default_inventory_id !== settings.default_inventory_id ||
+      // Compare with 0 as fallback to handle null/undefined from backend
+      form.default_inventory_id !== (settings.default_inventory_id ?? 0) ||
       form.notifications_enabled !== settings.notifications_enabled);
 
   return (
@@ -199,11 +204,12 @@ export function SettingsPage() {
                 <select
                   id="default_inventory"
                   className="setting-select"
-                  value={form.default_inventory_id ?? ''}
+                  value={form.default_inventory_id || ''}
                   onChange={(e) =>
                     setForm((prev) => ({
                       ...prev,
-                      default_inventory_id: e.target.value ? Number(e.target.value) : undefined,
+                      // Use 0 as sentinel value for "none" instead of undefined
+                      default_inventory_id: e.target.value ? Number(e.target.value) : 0,
                     }))
                   }
                   disabled={isLoading}
