@@ -40,8 +40,10 @@ const GITHUB_API_BASE = 'https://api.github.com';
 // These values can be overridden via environment variables:
 //   VITE_GITHUB_OWNER - GitHub organization/user (default: VictoryTek)
 //   VITE_GITHUB_REPO - Repository name (default: home-registry)
-const REPO_OWNER = ((import.meta.env.VITE_GITHUB_OWNER as string | undefined) ?? '') || 'VictoryTek';
-const REPO_NAME = ((import.meta.env.VITE_GITHUB_REPO as string | undefined) ?? '') || 'home-registry';
+const REPO_OWNER =
+  ((import.meta.env.VITE_GITHUB_OWNER as string | undefined) ?? '') || 'VictoryTek';
+const REPO_NAME =
+  ((import.meta.env.VITE_GITHUB_REPO as string | undefined) ?? '') || 'home-registry';
 
 /**
  * Get cached version check data
@@ -100,7 +102,7 @@ async function fetchCurrentVersion(): Promise<string> {
       throw new Error(`Health check failed: ${response.status}`);
     }
 
-    const data = await response.json() as { version?: string };
+    const data = (await response.json()) as { version?: string };
     return (data.version ?? '') || '0.0.0';
   } catch (error) {
     console.warn('Failed to fetch current version from backend:', error);
@@ -136,7 +138,7 @@ async function fetchLatestRelease(): Promise<{ version: string; url: string } | 
       throw new Error(`GitHub API returned ${response.status}`);
     }
 
-    const data = await response.json() as GitHubRelease;
+    const data = (await response.json()) as GitHubRelease;
 
     // Skip draft releases
     if (data.draft) {

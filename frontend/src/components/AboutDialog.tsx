@@ -35,7 +35,7 @@ export function AboutDialog({
     if (!timestamp) {
       return 'Never';
     }
-    
+
     try {
       const date = new Date(timestamp);
       const now = new Date();
@@ -56,7 +56,7 @@ export function AboutDialog({
       if (diffDays < 7) {
         return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
       }
-      
+
       return date.toLocaleDateString();
     } catch {
       return 'Unknown';
@@ -66,10 +66,10 @@ export function AboutDialog({
   const handleCheckForUpdates = async () => {
     setCheckMessage(null);
     setCheckMessageType(null);
-    
+
     try {
       await onCheckForUpdates();
-      
+
       // Check results after update completes
       setTimeout(() => {
         if (latestVersion && latestVersion !== currentVersion) {
@@ -79,7 +79,7 @@ export function AboutDialog({
           // Up to date
           setCheckMessage("You're up to date! Running the latest version.");
           setCheckMessageType('success');
-          
+
           // Auto-clear after 5 seconds
           setTimeout(() => {
             setCheckMessage(null);
@@ -95,11 +95,7 @@ export function AboutDialog({
 
   const footer = (
     <div className="modal-actions">
-      <button
-        className="btn btn-secondary"
-        onClick={handleCheckForUpdates}
-        disabled={isChecking}
-      >
+      <button className="btn btn-secondary" onClick={handleCheckForUpdates} disabled={isChecking}>
         {isChecking ? (
           <>
             <i className="fas fa-spinner fa-spin"></i>
@@ -112,29 +108,28 @@ export function AboutDialog({
           </>
         )}
       </button>
-      
+
       {checkMessage && (
-        <div 
-          style={{ 
+        <div
+          style={{
             fontSize: '0.85rem',
             padding: '0.5rem 0.75rem',
             borderRadius: 'var(--radius-sm)',
-            background: checkMessageType === 'success' 
-              ? 'rgba(34, 197, 94, 0.1)' 
-              : 'rgba(239, 68, 68, 0.1)',
-            color: checkMessageType === 'success' 
-              ? 'rgb(34, 197, 94)' 
-              : 'rgb(239, 68, 68)',
+            background:
+              checkMessageType === 'success' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+            color: checkMessageType === 'success' ? 'rgb(34, 197, 94)' : 'rgb(239, 68, 68)',
             display: 'flex',
             alignItems: 'center',
             gap: '0.5rem',
           }}
         >
-          <i className={`fas fa-${checkMessageType === 'success' ? 'check-circle' : 'exclamation-triangle'}`}></i>
+          <i
+            className={`fas fa-${checkMessageType === 'success' ? 'check-circle' : 'exclamation-triangle'}`}
+          ></i>
           {checkMessage}
         </div>
       )}
-      
+
       <button className="btn btn-primary" onClick={onClose}>
         Close
       </button>
@@ -142,29 +137,31 @@ export function AboutDialog({
   );
 
   return (
-    <Modal 
-      isOpen={isOpen} 
-      onClose={onClose} 
-      title="About" 
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="About"
       subtitle="Application Information & Updates"
-      footer={footer} 
+      footer={footer}
       maxWidth="550px"
     >
       <div style={{ padding: '0.5rem 0' }}>
         {/* Header Section */}
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '0.75rem' }}>
-            <img 
-              src={theme === 'light' ? '/logo_full3.png' : '/logo_full.png'} 
-              alt="Home Registry" 
-              style={{ 
-                height: '64px', 
+            <img
+              src={theme === 'light' ? '/logo_full3.png' : '/logo_full.png'}
+              alt="Home Registry"
+              style={{
+                height: '64px',
                 width: 'auto',
-                filter: 'drop-shadow(0 4px 12px rgba(59, 130, 246, 0.2))'
-              }} 
+                filter: 'drop-shadow(0 4px 12px rgba(59, 130, 246, 0.2))',
+              }}
             />
           </div>
-          <p style={{ margin: '0.5rem 0 0 0', color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
+          <p
+            style={{ margin: '0.5rem 0 0 0', color: 'var(--text-secondary)', fontSize: '0.95rem' }}
+          >
             Universal Home Inventory Management System
           </p>
         </div>
@@ -183,21 +180,39 @@ export function AboutDialog({
             }}
           >
             <div>
-              <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
+              <div
+                style={{
+                  fontSize: '0.875rem',
+                  color: 'var(--text-secondary)',
+                  marginBottom: '0.25rem',
+                }}
+              >
                 Current Version
               </div>
               <div style={{ fontSize: '1.25rem', fontWeight: 600, fontFamily: 'monospace' }}>
                 {currentVersion}
               </div>
               {lastChecked && (
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', marginTop: '0.25rem' }}>
+                <div
+                  style={{
+                    fontSize: '0.75rem',
+                    color: 'var(--text-tertiary)',
+                    marginTop: '0.25rem',
+                  }}
+                >
                   Last checked: {formatLastChecked(lastChecked)}
                 </div>
               )}
             </div>
             {latestVersion && latestVersion !== currentVersion && (
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
+                <div
+                  style={{
+                    fontSize: '0.875rem',
+                    color: 'var(--text-secondary)',
+                    marginBottom: '0.25rem',
+                  }}
+                >
                   Latest Version
                 </div>
                 <div
@@ -225,7 +240,8 @@ export function AboutDialog({
                       marginTop: '0.25rem',
                     }}
                   >
-                    View Release <i className="fas fa-external-link-alt" style={{ fontSize: '0.7rem' }}></i>
+                    View Release{' '}
+                    <i className="fas fa-external-link-alt" style={{ fontSize: '0.7rem' }}></i>
                   </a>
                 )}
               </div>
@@ -244,14 +260,27 @@ export function AboutDialog({
 
         {/* Project Information */}
         <div style={{ marginBottom: '1.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-            <i className="fas fa-balance-scale" style={{ color: 'var(--text-secondary)', width: '1.25rem' }}></i>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              marginBottom: '0.75rem',
+            }}
+          >
+            <i
+              className="fas fa-balance-scale"
+              style={{ color: 'var(--text-secondary)', width: '1.25rem' }}
+            ></i>
             <span style={{ fontSize: '0.9rem' }}>
               <strong>License:</strong> MIT License
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <i className="fab fa-github" style={{ color: 'var(--text-secondary)', width: '1.25rem' }}></i>
+            <i
+              className="fab fa-github"
+              style={{ color: 'var(--text-secondary)', width: '1.25rem' }}
+            ></i>
             <span style={{ fontSize: '0.9rem' }}>
               <strong>GitHub:</strong>{' '}
               <a
@@ -284,7 +313,14 @@ export function AboutDialog({
 
         {/* Tech Stack */}
         <div style={{ marginBottom: '1.5rem' }}>
-          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem', color: 'var(--text-secondary)' }}>
+          <h4
+            style={{
+              fontSize: '0.95rem',
+              fontWeight: 600,
+              marginBottom: '0.75rem',
+              color: 'var(--text-secondary)',
+            }}
+          >
             Built With:
           </h4>
           <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: '0.9rem', lineHeight: '1.8' }}>
@@ -293,7 +329,6 @@ export function AboutDialog({
             <li>PostgreSQL (Database)</li>
           </ul>
         </div>
-
       </div>
     </Modal>
   );

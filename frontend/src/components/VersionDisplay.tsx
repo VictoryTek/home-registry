@@ -39,9 +39,7 @@ export function VersionDisplay() {
         >
           v{versionCheck.currentVersion}
           {versionCheck.updateAvailable && (
-            <span style={{ color: 'var(--accent-color)', fontWeight: 600 }}>
-              {' '}(Update)
-            </span>
+            <span style={{ color: 'var(--accent-color)', fontWeight: 600 }}> (Update)</span>
           )}
         </div>
         {versionCheck.updateAvailable && versionCheck.releaseUrl && (
