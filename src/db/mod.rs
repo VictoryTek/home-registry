@@ -49,41 +49,62 @@ fn escape_like_pattern(input: &str) -> String {
 }
 
 pub fn get_pool() -> Result<Pool, Box<dyn std::error::Error + Send + Sync>> {
-    let db_url =
-        env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable must be set")?;
+    let mut cfg = Config::new();
 
-    // Parse DATABASE_URL: postgres://user:password@host:port/database
-    let url = db_url
-        .strip_prefix("postgres://")
-        .ok_or("Invalid DATABASE_URL format: must start with postgres://")?;
+    if let Ok(db_url) = env::var("DATABASE_URL") {
+        // Parse DATABASE_URL: postgres://user:password@host:port/database
+        let url = db_url
+            .strip_prefix("postgres://")
+            .ok_or("Invalid DATABASE_URL format: must start with postgres://")?;
 
-    let parts: Vec<&str> = url.split('@').collect();
-    if parts.len() != 2 {
-        return Err(
-            "Invalid DATABASE_URL format: expected postgres://user:password@host/database".into(),
-        );
+        let parts: Vec<&str> = url.split('@').collect();
+        if parts.len() != 2 {
+            return Err(
+                "Invalid DATABASE_URL format: expected postgres://user:password@host/database"
+                    .into(),
+            );
+        }
+
+        let auth_parts: Vec<&str> = parts[0].split(':').collect();
+        let host_parts: Vec<&str> = parts[1].split('/').collect();
+        let host_port: Vec<&str> = host_parts[0].split(':').collect();
+
+        let user = (*auth_parts.first().unwrap_or(&"postgres")).to_string();
+        let password = (*auth_parts.get(1).unwrap_or(&"password")).to_string();
+        let host = (*host_port.first().unwrap_or(&"localhost")).to_string();
+        let port = host_port
+            .get(1)
+            .unwrap_or(&"5432")
+            .parse::<u16>()
+            .unwrap_or(5432);
+        let dbname = (*host_parts.get(1).unwrap_or(&"home_inventory")).to_string();
+
+        cfg.user = Some(user);
+        cfg.password = Some(password);
+        cfg.host = Some(host);
+        cfg.port = Some(port);
+        cfg.dbname = Some(dbname);
+    } else {
+        // Fall back to discrete POSTGRES_* vars so deployments can keep the
+        // password in a separate secret instead of a single composed URL.
+        let password = env::var("POSTGRES_PASSWORD").map_err(|_| {
+            "Either DATABASE_URL or POSTGRES_PASSWORD environment variable must be set"
+        })?;
+        let host = env::var("POSTGRES_HOST").unwrap_or_else(|_| "localhost".to_string());
+        let port = env::var("POSTGRES_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(5432);
+        let user = env::var("POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+        let dbname = env::var("POSTGRES_DB").unwrap_or_else(|_| "home_inventory".to_string());
+
+        cfg.user = Some(user);
+        cfg.password = Some(password);
+        cfg.host = Some(host);
+        cfg.port = Some(port);
+        cfg.dbname = Some(dbname);
     }
 
-    let auth_parts: Vec<&str> = parts[0].split(':').collect();
-    let host_parts: Vec<&str> = parts[1].split('/').collect();
-    let host_port: Vec<&str> = host_parts[0].split(':').collect();
-
-    let user = (*auth_parts.first().unwrap_or(&"postgres")).to_string();
-    let password = (*auth_parts.get(1).unwrap_or(&"password")).to_string();
-    let host = (*host_port.first().unwrap_or(&"localhost")).to_string();
-    let port = host_port
-        .get(1)
-        .unwrap_or(&"5432")
-        .parse::<u16>()
-        .unwrap_or(5432);
-    let dbname = (*host_parts.get(1).unwrap_or(&"home_inventory")).to_string();
-
-    let mut cfg = Config::new();
-    cfg.user = Some(user);
-    cfg.password = Some(password);
-    cfg.host = Some(host);
-    cfg.port = Some(port);
-    cfg.dbname = Some(dbname);
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
