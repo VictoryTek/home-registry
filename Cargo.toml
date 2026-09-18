@@ -29,10 +29,10 @@ actix-cors = "=0.7.1"      # For CORS support
 actix-multipart = "=0.7.2" # For multipart file upload (backup restore)
 actix-extensible-rate-limit = "=0.4.0"  # Rate limiting middleware (MIT/Apache-2.0)
 tokio = { version = "=1.49.0", features = ["full"] }
-serde = { version = "=1.0.220", features = ["derive"] }
-serde_json = "=1.0.138"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
 dotenvy = "=0.15.7"
-tokio-postgres = { version = "=0.7.12", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+tokio-postgres = { version = "=0.7.18", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 deadpool-postgres = "=0.14.0"
 env_logger = "=0.11.6"     # For better logging
 log = "=0.4.22"            # Logging support
@@ -43,10 +43,10 @@ rust_decimal = { version = "=1.36.0", features = ["tokio-pg"] } # For PostgreSQL
 jsonwebtoken = "=9.3.0"    # JWT token handling
 argon2 = "=0.5.3"          # Password hashing (Argon2id)
 uuid = { version = "=1.11.0", features = ["v4", "serde"] }  # UUID generation
-rand = "=0.8.5"            # Random number generation for tokens
+rand = "=0.8.8"            # Random number generation for tokens
 
 # Input validation
-validator = { version = "=0.19.0", features = ["derive"] }
+validator = { version = "=0.21.0", features = ["derive"] }
 
 # TOTP authenticator support
 totp-rs = { version = "=5.6.0", features = ["otpauth", "qr", "gen_secret"] }

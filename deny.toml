@@ -28,7 +28,12 @@ unmaintained = "all"
 # Threshold for yanked crates
 yanked = "deny"
 # List of ignored advisories (add with reason if needed)
-ignore = []
+# RUSTSEC-2026-0258: h2 0.3.27 "unbounded empty DATA frames" (low severity), pulled in
+# transitively via actix-http (actix-web/actix-files). Fix landed in h2 >=0.4.16, but
+# actix-http still pins h2 = "0.3.27" exactly as of its current main branch (checked
+# 2026-09-18) -- no h2 0.4.x migration available yet, so there is no safe upgrade path
+# from this crate. Revisit once actix-web/actix-http move to h2 0.4.x.
+ignore = ["RUSTSEC-2026-0258"]
 
 # ------------------------------------------------------------------------------
 # LICENSES - Ensure dependencies use acceptable licenses
