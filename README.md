@@ -213,6 +213,85 @@ The application supports the following configuration through environment variabl
 - **Use Case**: Protects your server from being overwhelmed by aggressive API clients, accidental infinite loops, or potential DoS attacks.
 - **Production Recommendation**: Start with `RPS: 100` and `BURST: 200`, then adjust based on your usage patterns and server capacity.
 
+## Nix / NixOS Deployment
+
+In addition to the Docker path above, home-registry ships a [Nix flake](https://nixos.wiki/wiki/Flakes)
+exposing a package and a NixOS module for running it as a native systemd service,
+with no container runtime involved.
+
+**Note on `DATABASE_URL`:** the app's `DATABASE_URL` parser splits on `@`, `:` and `/`
+without percent-decoding, so a password containing any of those characters breaks the
+connection string. The app also accepts discrete `POSTGRES_HOST` / `POSTGRES_PORT` /
+`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` environment variables instead —
+`POSTGRES_PASSWORD` is read as a single opaque string with no splitting, so any
+password works. The NixOS module below always uses this discrete-variable path and
+never sets `DATABASE_URL`.
+
+**Migrations:** the binary embeds all SQL migrations at compile time and runs them
+itself against the configured database on every startup, before it binds the HTTP
+port (see `src/main.rs`). The NixOS module does not run a separate migration step.
+
+### Building the package
+
+```bash
+nix build .#default
+./result/bin/home-registry
+```
+
+### Using the NixOS module
+
+Add this flake as an input and import `nixosModules.default`:
+
+```nix
+{
+  inputs.home-registry.url = "github:your-org/home-registry";
+
+  outputs = { self, nixpkgs, home-registry, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        home-registry.nixosModules.default
+        {
+          services.home-registry = {
+            enable = true;
+            port = 8210;
+            openFirewall = true;
+            environmentFile = "/run/secrets/home-registry.env"; # POSTGRES_PASSWORD=...
+            database = {
+              createLocally = true; # provisions services.postgresql locally
+              user = "home_registry";
+              name = "home_registry";
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+Set `database.createLocally = false` and `database.host`/`database.port` to point at
+an externally-managed PostgreSQL instance instead; `environmentFile` must still
+provide `POSTGRES_PASSWORD` for that role.
+
+#### Module options (`services.home-registry`)
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `enable` | bool | `false` | Enable the service. |
+| `package` | package | `pkgs.home-registry` (via this flake's overlay) | Package to run. |
+| `port` | port | `8210` | HTTP listen port. |
+| `dataDir` | path | `/var/lib/home-registry` | Holds the persisted JWT secret, uploaded images, backups, and a symlink to the packaged static frontend assets. At the default path the service runs with `DynamicUser`; a custom path switches to a dedicated `home-registry` system user. |
+| `environmentFile` | path or null | `null` | `EnvironmentFile` for secrets (`POSTGRES_PASSWORD`, optional `JWT_SECRET`). Required when `database.createLocally = true`. Never stored in the Nix store. |
+| `openFirewall` | bool | `true` | Open `port`/tcp in `networking.firewall`. |
+| `rateLimitRps` | int or null | `null` | Optional `RATE_LIMIT_RPS` override. |
+| `rateLimitBurst` | int or null | `null` | Optional `RATE_LIMIT_BURST` override. |
+| `database.createLocally` | bool | `false` | Provision a local PostgreSQL database/role via `services.postgresql.ensureDatabases`/`ensureUsers`, and sync its password from `environmentFile` on every service start. |
+| `database.host` | str | `"127.0.0.1"` | `POSTGRES_HOST`. |
+| `database.port` | port | `5432` | `POSTGRES_PORT`. |
+| `database.user` | str | `"home_registry"` | `POSTGRES_USER`. |
+| `database.name` | str | `"home_registry"` | `POSTGRES_DB`. |
+
 ## Production Deployment
 
 For production deployments with HTTPS, reverse proxy, monitoring, and high availability, see our comprehensive deployment guides:
