@@ -4,9 +4,6 @@ backups/
 uploads/
 .history/
 
-# SubAgent generated documentation
-.github/docs/
-
 # Test artifacts
 test_results.txt
 *.test.log

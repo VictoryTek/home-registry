@@ -63,7 +63,7 @@ Every user request follows this three-phase workflow:
 │ Subagent #1                                                         │
 │ • Reads and analyzes codebase files                                 │
 │ • Researches minimum 6 credible sources                             │
-│ • Documents findings in: .github/docs/SubAgent docs/[NAME].md       │
+│ • Documents findings in: .github/docs/subagent_docs/[NAME].md       │
 │ • Returns: summary + spec file path                                 │
 └──────────────────────────┬──────────────────────────────────────────┘
                            ↓
@@ -74,7 +74,7 @@ Every user request follows this three-phase workflow:
 ┌─────────────────────────────────────────────────────────────┐
 │ PHASE 2: IMPLEMENTATION                                     │
 │ Subagent #2 (fresh context)                                 │
-│ • Reads spec from: .github/docs/SubAgent docs/[NAME].md             │
+│ • Reads spec from: .github/docs/subagent_docs/[NAME].md             │
 │ • Implements all code changes per specification             │
 │ • Returns: summary + list of modified file paths            │
 └──────────────────────────┬──────────────────────────────────┘
@@ -88,7 +88,7 @@ Every user request follows this three-phase workflow:
 │ Subagent #3 (fresh context)                                 │
 │ • Reviews implemented code at specified paths               │
 │ • Validates: best practices, consistency, maintainability   │
-│ • Documents review in: .github/docs/SubAgent docs/[NAME]_review.md  │
+│ • Documents review in: .github/docs/subagent_docs/[NAME]_review.md  │
 │ • Returns: findings + recommendations                       │
 └──────────────────────────┬──────────────────────────────────┘
                            ↓
@@ -109,7 +109,7 @@ Every user request follows this three-phase workflow:
 ┌─────────────────────────────────────────────────────────────┐
 │ PHASE 4: REFINEMENT (if needed)                             │
 │ Subagent #4 (fresh context)                                 │
-│ • Reads review findings from: .github/docs/SubAgent docs/[NAME]_review.md │
+│ • Reads review findings from: .github/docs/subagent_docs/[NAME]_review.md │
 │ • Addresses all identified issues and recommendations       │
 │ • Re-implements affected code sections                      │
 │ • Returns: summary + list of modified file paths            │
@@ -124,7 +124,7 @@ Every user request follows this three-phase workflow:
 │ Subagent #5 (fresh context)                                 │
 │ • Reviews refined code at specified paths                   │
 │ • Validates fixes address previous findings                 │
-│ • Documents final review: .github/docs/SubAgent docs/[NAME]_review_final.md │
+│ • Documents final review: .github/docs/subagent_docs/[NAME]_review_final.md │
 │ • Returns: final assessment                                 │
 └──────────────────────────┬──────────────────────────────────┘
                            │
@@ -209,7 +209,7 @@ Tasks:
    - Review official patterns and current API standards
 3. Research minimum 6 credible sources for best practices
 4. Document architecture decisions and implementation approach
-5. Create comprehensive spec at: .github/docs/SubAgent docs/[DESCRIPTIVE_NAME].md
+5. Create comprehensive spec at: .github/docs/subagent_docs/[DESCRIPTIVE_NAME].md
 
 Required in spec:
 - Current state analysis
@@ -227,7 +227,7 @@ Return: Summary of findings and the complete spec file path.
 Implement [feature/fix] according to specification.
 
 Context:
-- Read the detailed spec at: .github/docs/SubAgent docs/[NAME].md
+- Read the detailed spec at: .github/docs/subagent_docs/[NAME].md
 - Follow all architecture decisions documented in the spec
 - Adhere to Home Registry patterns:
   * Use DatabaseService for all DB operations
@@ -253,7 +253,7 @@ Review the implemented code for quality and consistency.
 
 Context:
 - Review files at: [list of specific file paths from implementation]
-- Reference original spec at: .github/docs/SubAgent docs/[NAME].md
+- Reference original spec at: .github/docs/subagent_docs/[NAME].md
 
 Analysis criteria:
 1. **Best Practices**: Modern Rust coding standards, error handling, security
@@ -275,7 +275,7 @@ Tasks:
    - Run `cargo test` for integration tests
    - Document any build errors, warnings, or failures
    - If build/validation FAILS, return NEEDS_REFINEMENT with errors as CRITICAL issues
-5. Create review doc at: .github/docs/SubAgent docs/[NAME]_review.md
+5. Create review doc at: .github/docs/subagent_docs/[NAME]_review.md
 6. Clearly categorize findings as: CRITICAL (must fix), RECOMMENDED (should fix), OPTIONAL (nice to have)
    - Build failures are ALWAYS categorized as CRITICAL
 7. Include a summary score table with these categories:
@@ -314,8 +314,8 @@ Example Summary Score Format:
 Address review findings and improve the implementation.
 
 Context:
-- Read review findings at: .github/docs/SubAgent docs/[NAME]_review.md
-- Reference original spec at: .github/docs/SubAgent docs/[NAME].md
+- Read review findings at: .github/docs/subagent_docs/[NAME]_review.md
+- Reference original spec at: .github/docs/subagent_docs/[NAME].md
 - Review previously modified files at: [list of specific file paths]
 
 Tasks:
@@ -336,15 +336,15 @@ Verify that refinements successfully address review findings.
 
 Context:
 - Review refined files at: [list of specific file paths from refinement]
-- Reference initial review at: .github/docs/SubAgent docs/[NAME]_review.md
-- Reference original spec at: .github/docs/SubAgent docs/[NAME].md
+- Reference initial review at: .github/docs/subagent_docs/[NAME]_review.md
+- Reference original spec at: .github/docs/subagent_docs/[NAME].md
 
 Tasks:
 1. Verify all CRITICAL issues have been resolved
 2. Verify RECOMMENDED improvements have been implemented
 3. Ensure no new issues were introduced
 4. Confirm code still meets all original spec requirements
-5. Create final review doc at: .github/docs/SubAgent docs/[NAME]_review_final.md
+5. Create final review doc at: .github/docs/subagent_docs/[NAME]_review_final.md
 6. Include updated summary score table showing improvements from initial review
 7. Calculate and provide updated overall grade
 
@@ -443,12 +443,12 @@ const research = await runSubagent({
   description: "Research inventory categories",
   prompt: "Research... Return: summary and spec file path."
 });
-// Extract: "Spec created at: .github/docs/SubAgent docs/categories_spec.md"
+// Extract: "Spec created at: .github/docs/subagent_docs/categories_spec.md"
 
 // Phase 2: Implementation (pass the spec path)
 const implementation = await runSubagent({
   description: "Implement category system",
-  prompt: "Read spec at: .github/docs/SubAgent docs/categories_spec.md\nImplement... Return: modified file paths."
+  prompt: "Read spec at: .github/docs/subagent_docs/categories_spec.md\nImplement... Return: modified file paths."
 });
 // Extract: "Modified: src/api/mod.rs, src/db/mod.rs, src/models/mod.rs"
 
@@ -463,7 +463,7 @@ const review = await runSubagent({
 
 All subagent-generated documentation should be stored in:
 ```
-.github/docs/SubAgent docs/
+.github/docs/subagent_docs/
 ├── [feature]_spec.md              # Research phase output
 ├── [feature]_review.md            # Initial review phase output
 ├── [feature]_review_final.md      # Final review after refinement (if needed)
