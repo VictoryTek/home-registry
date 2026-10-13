@@ -5,6 +5,7 @@
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git diff:*)",
+      "Bash(git show:*)",
       "Bash(cargo fmt -- --check:*)",
       "Bash(cargo clippy --all-targets --all-features -- -D warnings:*)",
       "Bash(cargo deny check:*)",
@@ -24,11 +25,25 @@
       "Bash(git stash:*)",
       "Bash(cargo preflight:*)",
       "Bash(cargo test -- --include-ignored:*)",
+      "Bash(cargo test --all-features:*)",
       "Bash(docker build:*)",
       "Bash(trivy:*)",
       "Bash(syft:*)",
       "Bash(cargo tarpaulin:*)",
       "Bash(rm -rf:*)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/verify.sh",
+            "timeout": 600
+          }
+        ]
+      }
     ]
   }
 }
