@@ -8,10 +8,7 @@
 
 use actix_cors::Cors;
 use actix_files as fs;
-use actix_web::{
-    middleware::{DefaultHeaders, Logger},
-    web, App, HttpResponse, HttpServer, Responder,
-};
+use actix_web::{middleware::DefaultHeaders, web, App, HttpResponse, HttpServer, Responder};
 use dotenvy::dotenv;
 use refinery::embed_migrations;
 use std::env;
@@ -158,23 +155,6 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(web::Data::new(pool.clone()))
-            // Allow up to 15 MiB JSON bodies (default is 32KB, too small for image uploads)
-            .app_data(
-                web::JsonConfig::default()
-                    .limit(15_728_640)
-                    .error_handler(|err, req| {
-                        let detail = format!("JSON payload error on {}: {}", req.path(), err);
-                        log::error!("{}", detail);
-                        let response = HttpResponse::BadRequest().json(serde_json::json!({
-                            "success": false,
-                            "error": "Request body error",
-                            "message": detail
-                        }));
-                        actix_web::error::InternalError::from_response(err, response).into()
-                    })
-            )
-            // Set payload limit to 20 MiB (default is 256KB, too small for image uploads)
-            .app_data(web::PayloadConfig::new(20 * 1024 * 1024))
             // Security headers
             .wrap(DefaultHeaders::new()
                 .add(("X-Frame-Options", "DENY"))
@@ -193,7 +173,7 @@ async fn main() -> std::io::Result<()> {
                        connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://cdnjs.cloudflare.com; \
                        frame-ancestors 'none'")))
             .wrap(cors)
-            .wrap(Logger::default())
+            .wrap(home_registry::access_log::access_logger())
             // API routes - apply rate limiting ONLY to API endpoints, not static assets
             // This prevents rate limiting from affecting frontend assets, logos, health checks, etc.
             .service(

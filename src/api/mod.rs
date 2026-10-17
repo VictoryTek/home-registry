@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod backup;
+pub mod extractors;
 pub mod totp;
 
 use crate::db::DatabaseService;
@@ -2089,22 +2090,29 @@ pub async fn get_category_breakdown_endpoint(
 
 // API 404 handler - returns JSON instead of HTML
 async fn api_not_found(req: HttpRequest) -> impl Responder {
-    log::warn!("API 404: {}", req.uri());
+    // Nothing the client sent is logged or echoed: an unmatched path can hold a token or an id
+    // mistyped into the wrong place. The reverse proxy's access log is where probes show up.
+    log::warn!(
+        "API 404: {} {}",
+        crate::access_log::loggable_method(req.method()),
+        crate::access_log::UNMATCHED
+    );
     HttpResponse::NotFound().json(ErrorResponse {
         success: false,
         error: "Endpoint not found".to_string(),
-        message: Some(format!(
-            "The API endpoint {uri} does not exist",
-            uri = req.uri()
-        )),
+        message: Some("The requested API endpoint does not exist.".to_string()),
     })
 }
 
 // Create scope with all API routes
 pub fn api_scope() -> Scope {
     web::scope("/api")
-        .app_data(web::JsonConfig::default().limit(15_728_640))
-        .app_data(web::PayloadConfig::new(20 * 1024 * 1024))
+        // The one place extractor limits and error envelopes are configured; scope-level
+        // app_data shadows App-level, so it must live here (see extractors.rs)
+        .app_data(extractors::json_config())
+        .app_data(extractors::query_config())
+        .app_data(extractors::path_config())
+        .app_data(web::PayloadConfig::new(extractors::PAYLOAD_LIMIT))
         .service(api_health)
         // Auth routes (setup, login, profile, admin user management) - imported directly to avoid nested scope
         .service(auth::get_setup_status)

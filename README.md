@@ -199,7 +199,7 @@ The application supports the following configuration through environment variabl
 |----------|-------------|---------|----------|
 | `DATABASE_URL` | PostgreSQL connection string | - | ✅ Yes |
 | `PORT` | HTTP server port | `8210` | No |
-| `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` | No |
+| `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`); do not use `debug` or `trace` for `actix_web` in production (see **What is logged**) | `info` | No |
 | `JWT_SECRET` | Secret key for JWT token signing (auto-generated if not set) | Auto-generated | No* |
 | `JWT_TOKEN_LIFETIME_HOURS` | JWT token expiration time in hours | `24` | No |
 | `RATE_LIMIT_RPS` | Sustained API requests per second per client (enforced over 60 s) | `50` | No |
@@ -220,6 +220,13 @@ The application supports the following configuration through environment variabl
 **Sessions and sign-out:**
 - The **Sign out** button only clears the token stored in your browser. The token itself stays valid until it expires (`JWT_TOKEN_LIFETIME_HOURS`, default 24 hours); logging out does not revoke it.
 - To really end sign-ins on other devices, use **Settings → Active Sessions → Sign out all other devices** (`POST /api/auth/logout-all`). Changing your password or turning two-factor authentication on or off does the same automatically, and the device you do it on stays signed in. An administrator resetting your password, deactivating you or changing your role signs you out on every device.
+
+**What is logged:**
+- The access log records the client address, the method, the matched route pattern (for example `/api/inventories/{id}`, not `/api/inventories/42`), the status, the response size and the duration. It never records query strings, the `Referer` and `User-Agent` headers or values in path parameters, and a method outside GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, CONNECT and TRACE is logged as `OTHER`. The access log, the rejected-request lines and the unknown-endpoint line described below therefore contain nothing the client chose.
+- This applies to those HTTP-layer lines only. Application and audit log lines elsewhere (for example "created item", "listed backups for user", or a file name in an error) can still contain item, inventory and organizer names, file names and usernames; review them before sharing logs.
+- A request that matches no route is logged as `<unmatched>` and the 404 response does not repeat the URL. The application deliberately does not log unknown URLs: use your reverse proxy's access log to see probes, scans and user agents.
+- A request whose body, query string or path is rejected is logged as `Rejected request: <method> "<route>" (<category>)`. Neither the content nor the validation message is logged, and the error response never repeats what was sent.
+- Do not run production with `RUST_LOG=actix_web=debug` (or `debug` / `trace` globally): actix-web's own debug lines for failed request parsing include the concrete request path, which this application otherwise keeps out of its logs.
 
 ### Backups and restore
 

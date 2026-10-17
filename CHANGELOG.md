@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Malformed requests under `/api` now get the standard JSON error response.** Bad JSON, a
+  missing or wrong-typed field, an oversized body (413), a wrong `Content-Type`, an invalid
+  query string and an unparsable path id used to get actix's plain-text error (the custom
+  handler in `main.rs` never ran because the `/api` scope's own config shadowed it). They now
+  return `{"success": false, "error": ..., "message": ...}` with the same status as before.
+  Messages name the field and the expected type (``missing field `inventory_id` ``,
+  `invalid type: string, expected i32`) but never repeat what was sent, including the name of an
+  unknown field or enum variant and the value of a bad path id. Formats that are not
+  recognised get a fixed generic message. Logs record the method, route pattern and error
+  category only.
+- **Access logs no longer contain query strings, the `Referer` or the `User-Agent`.** (This covers
+  the access log, the rejected-request lines and the unknown-endpoint line; other application
+  log lines can still contain names and usernames. A non-standard HTTP method is logged as
+  `OTHER`. A backup upload that fails to parse is logged without the file's content.) The default format printed
+  the full request line; the new one logs the matched route pattern (`/api/inventories/{id}`),
+  so neither the query string nor values in path parameters are written. The unknown-route
+  (404) response and log no longer include the query string either. A request that matches no
+  route is logged as `<unmatched>` and the 404 message is a fixed sentence; use your reverse
+  proxy's access log to see probes.
+
 ### Changed
 - **Breaking (API): `POST /api/items` now requires `inventory_id`.** It must be a positive integer.
   Omitting it, or sending `0` or a negative number, returns `400`; a body without the field is

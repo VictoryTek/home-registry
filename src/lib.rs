@@ -10,6 +10,7 @@
 #![allow(clippy::too_many_lines)]
 
 // Public modules
+pub mod access_log;
 pub mod api;
 pub mod auth;
 pub mod db;

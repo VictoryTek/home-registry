@@ -271,7 +271,10 @@ pub async fn store_uploaded_backup(
     content: &[u8],
 ) -> std::result::Result<(BackupInfo, BackupData), UploadError> {
     let backup: BackupData = serde_json::from_slice(content).map_err(|e| {
-        error!("Invalid backup file format: {e}");
+        error!(
+            "Invalid backup file format: {}",
+            crate::api::extractors::loggable_json_error(&e)
+        );
         UploadError::NotABackup
     })?;
     if !SUPPORTED_FORMATS.contains(&backup.metadata.version.as_str()) {
