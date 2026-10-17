@@ -5,10 +5,10 @@ pub mod totp;
 use crate::db::DatabaseService;
 use crate::models::{
     ApiResponse, CreateInventoryRequest, CreateItemRequest, CreateOrganizerOptionRequest,
-    CreateOrganizerTypeRequest, ErrorResponse, ImageUploadResponse, InventoryReportData,
-    InventoryReportRequest, Item, ItemExportRow, SetItemOrganizerValuesRequest,
-    UpdateInventoryRequest, UpdateItemRequest, UpdateOrganizerOptionRequest,
-    UpdateOrganizerTypeRequest,
+    CreateOrganizerTypeRequest, EffectivePermissions, ErrorResponse, ImageUploadResponse,
+    InventoryReportData, InventoryReportRequest, Item, ItemExportRow,
+    SetItemOrganizerValuesRequest, UpdateInventoryRequest, UpdateItemRequest,
+    UpdateOrganizerOptionRequest, UpdateOrganizerTypeRequest,
 };
 use actix_multipart::form::{tempfile::TempFile, MultipartForm};
 use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse, Responder, Result, Scope};
@@ -42,6 +42,118 @@ pub async fn api_health() -> impl Responder {
         "message": "Home Inventory Manager is running",
         "timestamp": chrono::Utc::now()
     }))
+}
+
+/// Permission an endpoint requires on the target inventory.
+#[derive(Clone, Copy, Debug)]
+enum Perm {
+    View,
+    EditInventory,
+    DeleteInventory,
+    AddItems,
+    EditItems,
+    RemoveItems,
+    ManageOrganizers,
+}
+
+impl Perm {
+    fn granted_by(self, p: &EffectivePermissions) -> bool {
+        match self {
+            Perm::View => p.can_view,
+            Perm::EditInventory => p.can_edit_inventory,
+            Perm::DeleteInventory => p.can_delete_inventory,
+            Perm::AddItems => p.can_add_items,
+            Perm::EditItems => p.can_edit_items,
+            Perm::RemoveItems => p.can_remove_items,
+            Perm::ManageOrganizers => p.can_manage_organizers,
+        }
+    }
+}
+
+fn internal_error_response(message: &str) -> HttpResponse {
+    HttpResponse::InternalServerError().json(ErrorResponse {
+        success: false,
+        error: "An internal error occurred".to_string(),
+        message: Some(message.to_string()),
+    })
+}
+
+fn not_found_response(what: &str) -> HttpResponse {
+    HttpResponse::NotFound().json(ErrorResponse {
+        success: false,
+        error: format!("{what} not found"),
+        message: Some(format!("{what} not found")),
+    })
+}
+
+/// Authenticate the caller and check they hold `perm` on `inventory_id`.
+/// Unknown inventories and inventories the caller cannot view both yield 404 so ids do not leak.
+async fn authorize_inventory(
+    pool: &Pool,
+    req: &HttpRequest,
+    inventory_id: i32,
+    perm: Perm,
+) -> std::result::Result<crate::auth::AuthContext, HttpResponse> {
+    let ctx = auth::get_auth_context_from_request(req, pool).await?;
+    let db = DatabaseService::new(pool.clone());
+    let perms = db
+        .get_effective_permissions(ctx.user_id, inventory_id)
+        .await
+        .map_err(|e| {
+            error!("Error checking permissions: {}", e);
+            internal_error_response("Failed to check permissions")
+        })?;
+    if !perms.can_view {
+        return Err(not_found_response("Resource"));
+    }
+    if !perm.granted_by(&perms) {
+        return Err(HttpResponse::Forbidden().json(ErrorResponse {
+            success: false,
+            error: "Insufficient permissions".to_string(),
+            message: Some("You don't have permission to perform this action".to_string()),
+        }));
+    }
+    Ok(ctx)
+}
+
+/// IDs of every inventory the user can view (owned, shared, or via an All Access grant).
+async fn accessible_inventory_ids(
+    db: &DatabaseService,
+    user_id: uuid::Uuid,
+) -> std::result::Result<Vec<i32>, HttpResponse> {
+    match db.get_accessible_inventories(user_id).await {
+        Ok(inventories) => Ok(inventories.iter().filter_map(|i| i.id).collect()),
+        Err(e) => {
+            error!("Error listing accessible inventories: {}", e);
+            Err(internal_error_response("Failed to check permissions"))
+        },
+    }
+}
+
+/// Authorize against the inventory resolved by `lookup`. Authentication happens first so
+/// unauthenticated callers cannot probe which ids exist.
+async fn authorize_resolved(
+    pool: &Pool,
+    req: &HttpRequest,
+    lookup: std::result::Result<Option<i32>, Box<dyn std::error::Error>>,
+    what: &str,
+    perm: Perm,
+) -> std::result::Result<crate::auth::AuthContext, HttpResponse> {
+    let lookup = lookup.map_err(|e| {
+        error!("Error resolving inventory for {}: {}", what, e);
+        internal_error_response("Failed to check permissions")
+    });
+    match lookup {
+        Ok(Some(inventory_id)) => authorize_inventory(pool, req, inventory_id, perm).await,
+        Ok(None) => {
+            auth::get_auth_context_from_request(req, pool).await?;
+            Err(not_found_response("Resource"))
+        },
+        Err(resp) => {
+            auth::get_auth_context_from_request(req, pool).await?;
+            Err(resp)
+        },
+    }
 }
 
 // Inventories API endpoints
@@ -138,8 +250,17 @@ pub async fn create_inventory(
 }
 
 #[get("/inventories/{id}")]
-pub async fn get_inventory(pool: web::Data<Pool>, path: web::Path<i32>) -> Result<impl Responder> {
+pub async fn get_inventory(
+    pool: web::Data<Pool>,
+    http_req: HttpRequest,
+    path: web::Path<i32>,
+) -> Result<impl Responder> {
     let inventory_id = path.into_inner();
+    if let Err(resp) =
+        authorize_inventory(pool.get_ref(), &http_req, inventory_id, Perm::View).await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_inventory_by_id(inventory_id).await {
@@ -171,9 +292,15 @@ pub async fn get_inventory(pool: web::Data<Pool>, path: web::Path<i32>) -> Resul
 #[get("/inventories/{id}/items")]
 pub async fn get_inventory_items(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let inventory_id = path.into_inner();
+    if let Err(resp) =
+        authorize_inventory(pool.get_ref(), &http_req, inventory_id, Perm::View).await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_items_by_inventory(inventory_id).await {
@@ -207,6 +334,7 @@ pub async fn get_inventory_items(
 #[put("/inventories/{id}")]
 pub async fn update_inventory(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<UpdateInventoryRequest>,
 ) -> Result<impl Responder> {
@@ -229,6 +357,12 @@ pub async fn update_inventory(
     }
 
     let inventory_id = path.into_inner();
+
+    if let Err(resp) =
+        authorize_inventory(pool.get_ref(), &http_req, inventory_id, Perm::EditInventory).await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
@@ -263,9 +397,20 @@ pub async fn update_inventory(
 #[delete("/inventories/{id}")]
 pub async fn delete_inventory(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let inventory_id = path.into_inner();
+    if let Err(resp) = authorize_inventory(
+        pool.get_ref(),
+        &http_req,
+        inventory_id,
+        Perm::DeleteInventory,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.delete_inventory(inventory_id).await {
@@ -296,10 +441,19 @@ pub async fn delete_inventory(
 
 // Items API endpoints
 #[get("/items")]
-pub async fn get_items(pool: web::Data<Pool>) -> Result<impl Responder> {
+pub async fn get_items(pool: web::Data<Pool>, http_req: HttpRequest) -> Result<impl Responder> {
+    let auth = match auth::get_auth_context_from_request(&http_req, pool.get_ref()).await {
+        Ok(a) => a,
+        Err(e) => return Ok(e),
+    };
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
-    match db_service.get_all_items().await {
+    let inventory_ids = match accessible_inventory_ids(&db_service, auth.user_id).await {
+        Ok(ids) => ids,
+        Err(resp) => return Ok(resp),
+    };
+
+    match db_service.get_items_in_inventories(&inventory_ids).await {
         Ok(items) => {
             info!("Successfully retrieved {} items from database", items.len());
             Ok(HttpResponse::Ok().json(ApiResponse {
@@ -321,8 +475,25 @@ pub async fn get_items(pool: web::Data<Pool>) -> Result<impl Responder> {
 }
 
 #[get("/items/{id}")]
-pub async fn get_item(pool: web::Data<Pool>, path: web::Path<i32>) -> Result<impl Responder> {
+pub async fn get_item(
+    pool: web::Data<Pool>,
+    http_req: HttpRequest,
+    path: web::Path<i32>,
+) -> Result<impl Responder> {
     let item_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_item_inventory_id(item_id)
+            .await,
+        "Item",
+        Perm::View,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_item_by_id(item_id).await {
@@ -354,8 +525,17 @@ pub async fn get_item(pool: web::Data<Pool>, path: web::Path<i32>) -> Result<imp
 #[post("/items")]
 pub async fn create_item(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     req: web::Json<CreateItemRequest>,
 ) -> Result<impl Responder> {
+    // Items default to inventory 1 when none is given (see H-10), so authorize against that
+    let target_inventory = req.inventory_id.unwrap_or(1);
+    if let Err(resp) =
+        authorize_inventory(pool.get_ref(), &http_req, target_inventory, Perm::AddItems).await
+    {
+        return Ok(resp);
+    }
+
     // Validate input before processing
     if let Err(validation_errors) = req.validate() {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
@@ -391,6 +571,7 @@ pub async fn create_item(
 #[put("/items/{id}")]
 pub async fn update_item(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<UpdateItemRequest>,
 ) -> Result<impl Responder> {
@@ -404,6 +585,28 @@ pub async fn update_item(
     }
 
     let item_id = path.into_inner();
+
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_item_inventory_id(item_id)
+            .await,
+        "Item",
+        Perm::EditItems,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
+    if let Some(destination) = req.inventory_id {
+        if let Err(resp) =
+            authorize_inventory(pool.get_ref(), &http_req, destination, Perm::AddItems).await
+        {
+            return Ok(resp);
+        }
+    }
+
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.update_item(item_id, req.into_inner()).await {
@@ -433,8 +636,25 @@ pub async fn update_item(
 }
 
 #[delete("/items/{id}")]
-pub async fn delete_item(pool: web::Data<Pool>, path: web::Path<i32>) -> Result<impl Responder> {
+pub async fn delete_item(
+    pool: web::Data<Pool>,
+    http_req: HttpRequest,
+    path: web::Path<i32>,
+) -> Result<impl Responder> {
     let item_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_item_inventory_id(item_id)
+            .await,
+        "Item",
+        Perm::RemoveItems,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.delete_item(item_id).await {
@@ -466,12 +686,25 @@ pub async fn delete_item(pool: web::Data<Pool>, path: web::Path<i32>) -> Result<
 #[get("/items/search/{query}")]
 pub async fn search_items(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<String>,
 ) -> Result<impl Responder> {
+    let auth = match auth::get_auth_context_from_request(&http_req, pool.get_ref()).await {
+        Ok(a) => a,
+        Err(e) => return Ok(e),
+    };
     let query = path.into_inner();
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
-    match db_service.search_items(&query).await {
+    let inventory_ids = match accessible_inventory_ids(&db_service, auth.user_id).await {
+        Ok(ids) => ids,
+        Err(resp) => return Ok(resp),
+    };
+
+    match db_service
+        .search_items_in_inventories(&inventory_ids, &query)
+        .await
+    {
         Ok(items) => {
             info!(
                 "Successfully searched items with query '{}', found {} results",
@@ -504,9 +737,15 @@ pub async fn search_items(
 #[get("/inventories/{id}/organizers")]
 pub async fn get_inventory_organizers(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let inventory_id = path.into_inner();
+    if let Err(resp) =
+        authorize_inventory(pool.get_ref(), &http_req, inventory_id, Perm::View).await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
@@ -543,10 +782,21 @@ pub async fn get_inventory_organizers(
 #[post("/inventories/{id}/organizers")]
 pub async fn create_organizer_type(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<CreateOrganizerTypeRequest>,
 ) -> Result<impl Responder> {
     let inventory_id = path.into_inner();
+    if let Err(resp) = authorize_inventory(
+        pool.get_ref(),
+        &http_req,
+        inventory_id,
+        Perm::ManageOrganizers,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
@@ -576,9 +826,23 @@ pub async fn create_organizer_type(
 #[get("/organizers/{id}")]
 pub async fn get_organizer_type(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let organizer_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_type_inventory_id(organizer_id)
+            .await,
+        "Organizer type",
+        Perm::View,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_organizer_type_by_id(organizer_id).await {
@@ -613,10 +877,24 @@ pub async fn get_organizer_type(
 #[put("/organizers/{id}")]
 pub async fn update_organizer_type(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<UpdateOrganizerTypeRequest>,
 ) -> Result<impl Responder> {
     let organizer_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_type_inventory_id(organizer_id)
+            .await,
+        "Organizer type",
+        Perm::ManageOrganizers,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
@@ -654,9 +932,23 @@ pub async fn update_organizer_type(
 #[delete("/organizers/{id}")]
 pub async fn delete_organizer_type(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let organizer_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_type_inventory_id(organizer_id)
+            .await,
+        "Organizer type",
+        Perm::ManageOrganizers,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.delete_organizer_type(organizer_id).await {
@@ -693,9 +985,23 @@ pub async fn delete_organizer_type(
 #[get("/organizers/{id}/options")]
 pub async fn get_organizer_options(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let organizer_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_type_inventory_id(organizer_id)
+            .await,
+        "Organizer type",
+        Perm::View,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_organizer_options(organizer_id).await {
@@ -726,10 +1032,24 @@ pub async fn get_organizer_options(
 #[post("/organizers/{id}/options")]
 pub async fn create_organizer_option(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<CreateOrganizerOptionRequest>,
 ) -> Result<impl Responder> {
     let organizer_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_type_inventory_id(organizer_id)
+            .await,
+        "Organizer type",
+        Perm::ManageOrganizers,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
@@ -759,10 +1079,24 @@ pub async fn create_organizer_option(
 #[put("/organizer-options/{id}")]
 pub async fn update_organizer_option(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<UpdateOrganizerOptionRequest>,
 ) -> Result<impl Responder> {
     let option_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_option_inventory_id(option_id)
+            .await,
+        "Organizer option",
+        Perm::ManageOrganizers,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
@@ -800,9 +1134,23 @@ pub async fn update_organizer_option(
 #[delete("/organizer-options/{id}")]
 pub async fn delete_organizer_option(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let option_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_organizer_option_inventory_id(option_id)
+            .await,
+        "Organizer option",
+        Perm::ManageOrganizers,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.delete_organizer_option(option_id).await {
@@ -839,9 +1187,23 @@ pub async fn delete_organizer_option(
 #[get("/items/{id}/organizer-values")]
 pub async fn get_item_organizer_values(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
     let item_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_item_inventory_id(item_id)
+            .await,
+        "Item",
+        Perm::View,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_item_organizer_values(item_id).await {
@@ -875,11 +1237,70 @@ pub async fn get_item_organizer_values(
 #[put("/items/{id}/organizer-values")]
 pub async fn set_item_organizer_values(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<i32>,
     req: web::Json<SetItemOrganizerValuesRequest>,
 ) -> Result<impl Responder> {
     let item_id = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_item_inventory_id(item_id)
+            .await,
+        "Item",
+        Perm::EditItems,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    // Every organizer type/option must belong to the item's own inventory
+    let item_inventory = match db_service.get_item_inventory_id(item_id).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return Ok(not_found_response("Item")),
+        Err(e) => {
+            error!("Error resolving item inventory: {}", e);
+            return Ok(internal_error_response("Failed to check permissions"));
+        },
+    };
+    for value in &req.values {
+        let type_inventory = db_service
+            .get_organizer_type_inventory_id(value.organizer_type_id)
+            .await;
+        let option_inventory = match value.organizer_option_id {
+            Some(option_id) => Some(
+                db_service
+                    .get_organizer_option_inventory_id(option_id)
+                    .await,
+            ),
+            None => None,
+        };
+        let lookups_ok =
+            type_inventory.is_ok() && option_inventory.as_ref().is_none_or(Result::is_ok);
+        if !lookups_ok {
+            error!("Error validating organizer values for item {}", item_id);
+            return Ok(internal_error_response(
+                "Failed to validate organizer values",
+            ));
+        }
+        let type_matches = matches!(type_inventory, Ok(Some(id)) if id == item_inventory);
+        let option_matches = match option_inventory {
+            Some(Ok(found)) => found == Some(item_inventory),
+            _ => true,
+        };
+        if !type_matches || !option_matches {
+            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Validation failed".to_string(),
+                message: Some(
+                    "Organizer type or option does not belong to the item's inventory".to_string(),
+                ),
+            }));
+        }
+    }
 
     match db_service
         .set_item_organizer_values(item_id, req.into_inner().values)
@@ -912,9 +1333,23 @@ pub async fn set_item_organizer_values(
 #[delete("/items/{item_id}/organizer-values/{organizer_type_id}")]
 pub async fn delete_item_organizer_value(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     path: web::Path<(i32, i32)>,
 ) -> Result<impl Responder> {
     let (item_id, organizer_type_id) = path.into_inner();
+    if let Err(resp) = authorize_resolved(
+        pool.get_ref(),
+        &http_req,
+        DatabaseService::new(pool.get_ref().clone())
+            .get_item_inventory_id(item_id)
+            .await,
+        "Item",
+        Perm::EditItems,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service

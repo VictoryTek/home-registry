@@ -158,6 +158,95 @@ impl DatabaseService {
         Ok(items)
     }
 
+    /// Get all items belonging to any of the given inventories
+    pub async fn get_items_in_inventories(
+        &self,
+        inventory_ids: &[i32],
+    ) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+
+        let rows = client
+            .query(
+                "SELECT id, inventory_id, name, description, category, location, purchase_date::text, purchase_price::float8, warranty_expiry::text, notes, quantity, created_at, updated_at 
+             FROM items WHERE inventory_id = ANY($1) ORDER BY created_at DESC",
+                &[&inventory_ids],
+            )
+            .await?;
+
+        Ok(rows.iter().map(item_from_row).collect())
+    }
+
+    /// Search items, restricted to the given inventories
+    pub async fn search_items_in_inventories(
+        &self,
+        inventory_ids: &[i32],
+        query: &str,
+    ) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+
+        let escaped_query = escape_like_pattern(&query.to_lowercase());
+        let search_pattern = format!("%{escaped_query}%");
+        let rows = client
+            .query(
+                "SELECT id, inventory_id, name, description, category, location, purchase_date::text, purchase_price::float8, warranty_expiry::text, notes, quantity, created_at, updated_at 
+             FROM items 
+             WHERE inventory_id = ANY($2)
+               AND (LOWER(name) LIKE $1 ESCAPE '\\' 
+                OR LOWER(description) LIKE $1 ESCAPE '\\' 
+                OR LOWER(category) LIKE $1 ESCAPE '\\' 
+                OR LOWER(location) LIKE $1 ESCAPE '\\')
+             ORDER BY created_at DESC",
+                &[&search_pattern, &inventory_ids],
+            )
+            .await?;
+
+        Ok(rows.iter().map(item_from_row).collect())
+    }
+
+    /// Resolve the inventory an item belongs to
+    pub async fn get_item_inventory_id(
+        &self,
+        item_id: i32,
+    ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query("SELECT inventory_id FROM items WHERE id = $1", &[&item_id])
+            .await?;
+        Ok(rows.first().map(|r| r.get(0)))
+    }
+
+    /// Resolve the inventory an organizer type belongs to
+    pub async fn get_organizer_type_inventory_id(
+        &self,
+        organizer_type_id: i32,
+    ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT inventory_id FROM organizer_types WHERE id = $1",
+                &[&organizer_type_id],
+            )
+            .await?;
+        Ok(rows.first().map(|r| r.get(0)))
+    }
+
+    /// Resolve the inventory an organizer option belongs to
+    pub async fn get_organizer_option_inventory_id(
+        &self,
+        option_id: i32,
+    ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT t.inventory_id FROM organizer_options o
+                 JOIN organizer_types t ON t.id = o.organizer_type_id
+                 WHERE o.id = $1",
+                &[&option_id],
+            )
+            .await?;
+        Ok(rows.first().map(|r| r.get(0)))
+    }
+
     pub async fn get_item_by_id(
         &self,
         id: i32,
@@ -3104,4 +3193,22 @@ fn build_order_by(request: &crate::models::InventoryReportRequest) -> String {
     };
 
     format!("{column} {order}")
+}
+
+fn item_from_row(row: &tokio_postgres::Row) -> Item {
+    Item {
+        id: Some(row.get(0)),
+        inventory_id: row.get(1),
+        name: row.get(2),
+        description: row.get(3),
+        category: row.get(4),
+        location: row.get(5),
+        purchase_date: row.get::<_, Option<String>>(6),
+        purchase_price: row.get(7),
+        warranty_expiry: row.get::<_, Option<String>>(8),
+        notes: row.get(9),
+        quantity: row.get(10),
+        created_at: row.get::<_, Option<DateTime<Utc>>>(11),
+        updated_at: row.get::<_, Option<DateTime<Utc>>>(12),
+    }
 }

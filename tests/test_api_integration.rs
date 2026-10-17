@@ -318,9 +318,8 @@ async fn test_authorization_user_cannot_access_other_inventory() {
         .to_request();
 
     let resp = test::call_service(&app, req).await;
-    // Currently, the API allows any authenticated user to access inventories by ID
-    // TODO: Implement proper authorization/ownership checks
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Users without any access to the inventory get 404 so its existence is not revealed
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // Cleanup
     common::delete_test_inventory(&pool, inventory_id)
@@ -838,4 +837,248 @@ async fn test_item_foreign_key_constraint() {
 
     // Cleanup
     common::delete_test_user(&pool, &username).await.ok();
+}
+
+// ==================== Inventory Authorization Tests ====================
+
+#[actix_web::test]
+async fn test_data_endpoints_require_authorization() {
+    let pool = common::create_test_pool();
+
+    let app = test::init_service(
+        App::new().app_data(web::Data::new(pool.clone())).service(
+            web::scope("/api")
+                .service(api::get_items)
+                .service(api::get_item)
+                .service(api::search_items)
+                .service(api::update_inventory)
+                .service(api::delete_inventory),
+        ),
+    )
+    .await;
+
+    let owner_username = common::test_username("authz_owner");
+    let other_username = common::test_username("authz_other");
+    common::create_test_user(&pool, &owner_username).await;
+    common::create_test_user(&pool, &other_username).await;
+
+    let db = home_registry::db::DatabaseService::new(pool.clone());
+    let owner = db
+        .get_user_by_username(&owner_username)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let inventory_id = common::create_test_inventory(&pool, owner.id, "Private Inventory")
+        .await
+        .unwrap();
+    let unique_name = format!("PrivateItem_{}", uuid::Uuid::new_v4());
+    let item_id = common::create_test_item(&pool, inventory_id, &unique_name)
+        .await
+        .unwrap();
+
+    let other_token = common::get_test_token(&pool, &other_username).await;
+
+    // No token: 401 on every route
+    for uri in [
+        "/api/items".to_string(),
+        format!("/api/items/{item_id}"),
+        format!("/api/items/search/{unique_name}"),
+    ] {
+        let req = test::TestRequest::get().uri(&uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "GET {uri}");
+    }
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/inventories/{inventory_id}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Another user: 404 (existence is not revealed), and nothing is modified
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/items/{item_id}"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/inventories/{inventory_id}"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .set_json(json!({ "name": "Hijacked" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/inventories/{inventory_id}"))
+        .insert_header(("Authorization", format!("Bearer {other_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Listing and search only return the caller's accessible items
+    for uri in [
+        "/api/items".to_string(),
+        format!("/api/items/search/{unique_name}"),
+    ] {
+        let req = test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {other_token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(!body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"].as_str() == Some(&unique_name)));
+    }
+
+    // Cleanup
+    common::delete_test_item(&pool, item_id).await.ok();
+    common::delete_test_inventory(&pool, inventory_id)
+        .await
+        .ok();
+    common::delete_test_user(&pool, &owner_username).await.ok();
+    common::delete_test_user(&pool, &other_username).await.ok();
+}
+
+#[actix_web::test]
+async fn test_view_share_is_forbidden_to_modify_and_move_requires_destination() {
+    use home_registry::models::{CreateOrganizerTypeRequest, PermissionLevel};
+
+    let pool = common::create_test_pool();
+
+    let app = test::init_service(
+        App::new().app_data(web::Data::new(pool.clone())).service(
+            web::scope("/api")
+                .service(api::update_inventory)
+                .service(api::update_item)
+                .service(api::delete_item)
+                .service(api::set_item_organizer_values),
+        ),
+    )
+    .await;
+
+    let owner_username = common::test_username("authz_share_owner");
+    let viewer_username = common::test_username("authz_share_viewer");
+    common::create_test_user(&pool, &owner_username).await;
+    common::create_test_user(&pool, &viewer_username).await;
+
+    let db = home_registry::db::DatabaseService::new(pool.clone());
+    let owner = db
+        .get_user_by_username(&owner_username)
+        .await
+        .unwrap()
+        .unwrap();
+    let viewer = db
+        .get_user_by_username(&viewer_username)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Owner's inventory shared view-only with the viewer
+    let shared_inv = common::create_test_inventory(&pool, owner.id, "Shared")
+        .await
+        .unwrap();
+    db.create_inventory_share(shared_inv, viewer.id, owner.id, PermissionLevel::View)
+        .await
+        .unwrap();
+    // Owner-only inventory, plus the viewer's own inventory and item
+    let private_inv = common::create_test_inventory(&pool, owner.id, "Private")
+        .await
+        .unwrap();
+    let viewer_inv = common::create_test_inventory(&pool, viewer.id, "Viewer Own")
+        .await
+        .unwrap();
+    let shared_item = common::create_test_item(&pool, shared_inv, "Shared Item")
+        .await
+        .unwrap();
+    let viewer_item = common::create_test_item(&pool, viewer_inv, "Viewer Item")
+        .await
+        .unwrap();
+
+    let private_type = db
+        .create_organizer_type(
+            private_inv,
+            CreateOrganizerTypeRequest {
+                name: "Private Type".to_string(),
+                input_type: Some("text".to_string()),
+                is_required: None,
+                display_order: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let token = common::get_test_token(&pool, &viewer_username).await;
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // View-only share: can see, but modifying is 403
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/inventories/{shared_inv}"))
+        .insert_header(auth.clone())
+        .set_json(json!({ "name": "Renamed" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/items/{shared_item}"))
+        .insert_header(auth.clone())
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // Moving the viewer's own item into an inventory they cannot see is refused
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/items/{viewer_item}"))
+        .insert_header(auth.clone())
+        .set_json(json!({ "inventory_id": private_inv }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // ...and into one they can only view
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/items/{viewer_item}"))
+        .insert_header(auth.clone())
+        .set_json(json!({ "inventory_id": shared_inv }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // An organizer type from another inventory cannot be attached to the viewer's item
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/items/{viewer_item}/organizer-values"))
+        .insert_header(auth)
+        .set_json(json!({ "values": [{
+            "organizer_type_id": private_type.id.unwrap(),
+            "text_value": "x"
+        }] }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // Cleanup
+    common::delete_test_item(&pool, shared_item).await.ok();
+    common::delete_test_item(&pool, viewer_item).await.ok();
+    for id in [shared_inv, private_inv, viewer_inv] {
+        common::delete_test_inventory(&pool, id).await.ok();
+    }
+    common::delete_test_user(&pool, &owner_username).await.ok();
+    common::delete_test_user(&pool, &viewer_username).await.ok();
 }

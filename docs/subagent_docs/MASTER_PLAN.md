@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 0 / 19 high · 0 / 46 medium · 0 / 25 low
+**Progress:** 1 / 19 high · 0 / 46 medium · 0 / 25 low
 
 ---
 
@@ -16,7 +16,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 
 ### Security and access control (do these first; nothing user-facing should be built on top of unprotected endpoints)
 
-- [ ] **H-01 — Require authentication and per-inventory authorization on every data endpoint**
+- [x] **H-01 — Require authentication and per-inventory authorization on every data endpoint**
   Sources: ARCH-A1, BUGS-SEC1. Files: `src/api/mod.rs:140-950` (inventory, item, organizer, option, organizer-value handlers), `src/db/mod.rs:126-160, 391-437`.
   Today `GET /api/items`, `PUT/DELETE /api/inventories/{id}`, all item and organizer routes work with **no token**. Add a shared authorize helper that resolves item/organizer/option → inventory, loads `EffectivePermissions`, and returns 401/403/404; scope `GET /items` and `search` to accessible inventories. Frontend already sends the bearer token.
 - [ ] **H-02 — Ownership checks on share update/delete, image delete, and item-images listing**
