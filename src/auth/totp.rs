@@ -9,6 +9,7 @@ use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
 use std::env;
+use std::fmt::Write as _;
 use std::sync::OnceLock;
 use totp_rs::{Algorithm, Secret, TOTP};
 
@@ -82,6 +83,25 @@ pub fn get_or_init_totp_key() -> &'static [u8; 32] {
         );
         derive_key(jwt_secret.as_bytes())
     })
+}
+
+/// A short, non-secret fingerprint of the TOTP encryption key, recorded in backups.
+///
+/// Lets a restore detect that the stored (encrypted) 2FA secrets were made with a different
+/// key and could not be decrypted. It is an HKDF-SHA256 expansion of the key under its own
+/// label (HMAC-SHA256 based, domain-separated from the encryption use), truncated to 8 bytes,
+/// so it does not reveal the key.
+#[must_use]
+pub fn totp_key_fingerprint() -> String {
+    let hk = Hkdf::<Sha256>::from_prk(get_or_init_totp_key()).expect("32-byte PRK is valid");
+    let mut out = [0u8; 8];
+    hk.expand(b"home-registry-backup-key-fingerprint-v1", &mut out)
+        .expect("HKDF expand should never fail for 8-byte output");
+    let mut hex = String::with_capacity(16);
+    for byte in out {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Derive a 256-bit key from arbitrary input material using HKDF-SHA256

@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
-import { backupApi } from '@/services/api';
+import { backupApi, SESSION_NOTICE_KEY } from '@/services/api';
 import { ConfirmModal } from '@/components';
-import type { BackupInfo } from '@/types';
+import type { BackupInfo, RestoreReport } from '@/types';
 
 function formatBackupDate(dateString: string): string {
   const date = new Date(dateString);
@@ -18,7 +18,7 @@ function formatBackupDate(dateString: string): string {
 
 export function BackupRestoreSection() {
   const { showToast } = useApp();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
@@ -26,6 +26,12 @@ export function BackupRestoreSection() {
   const [isRestoring, setIsRestoring] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  // Set when the backup's two-factor data cannot be decrypted with this server's key
+  const [twoFaMismatch, setTwoFaMismatch] = useState<{ target: string; message: string } | null>(
+    null
+  );
+  // Set after a restore: every session has ended, so show the result before signing out
+  const [restoreResult, setRestoreResult] = useState<RestoreReport | null>(null);
 
   // Load backups on mount
   const loadBackups = useCallback(async () => {
@@ -110,23 +116,19 @@ export function BackupRestoreSection() {
     }
   };
 
-  // Restore confirm handler
-  const handleRestoreConfirm = async () => {
-    if (!restoreTarget) {
-      return;
-    }
-
+  // Restore a backup. `withoutTwoFa` is only set after the admin confirmed the second dialog.
+  const runRestore = async (target: string, withoutTwoFa: boolean) => {
     setIsRestoring(true);
-    const target = restoreTarget;
-    setRestoreTarget(null);
-
     try {
-      const result = await backupApi.restore(target);
-      if (result.success) {
-        showToast(result.message ?? 'Backup restored successfully', 'success');
-        await loadBackups();
+      const result = await backupApi.restore(target, withoutTwoFa);
+      if (result.success && result.data) {
+        // The restore ended every session, including this one. Do not call the API again; show
+        // the outcome and let the admin continue to the sign-in page.
+        setRestoreResult(result.data);
+      } else if (result.error === 'totp_key_mismatch') {
+        setTwoFaMismatch({ target, message: result.message ?? '' });
       } else {
-        showToast(result.error ?? 'Failed to restore backup', 'error');
+        showToast(result.message ?? result.error ?? 'Failed to restore backup', 'error');
       }
     } catch (error) {
       console.error('Error restoring backup:', error);
@@ -134,6 +136,30 @@ export function BackupRestoreSection() {
     } finally {
       setIsRestoring(false);
     }
+  };
+
+  const handleRestoreConfirm = async () => {
+    if (!restoreTarget) {
+      return;
+    }
+    const target = restoreTarget;
+    setRestoreTarget(null);
+    await runRestore(target, false);
+  };
+
+  const handleRestoreWithoutTwoFa = async () => {
+    if (!twoFaMismatch) {
+      return;
+    }
+    const target = twoFaMismatch.target;
+    setTwoFaMismatch(null);
+    await runRestore(target, true);
+  };
+
+  const continueToSignIn = () => {
+    logout();
+    sessionStorage.setItem(SESSION_NOTICE_KEY, 'revoked');
+    window.location.assign('/login');
   };
 
   // Delete confirm handler
@@ -296,11 +322,63 @@ export function BackupRestoreSection() {
         onClose={() => setRestoreTarget(null)}
         onConfirm={handleRestoreConfirm}
         title="Confirm Backup Restore"
-        message={`This will replace ALL current data with the backup "${restoreTarget ?? ''}". An automatic backup will be created first. This action cannot be undone.`}
+        message={`This will replace ALL current data with the backup "${restoreTarget ?? ''}". An automatic backup will be created first. Everyone, including you, will be signed out afterwards. Uploaded item photos are not part of backups. This action cannot be undone.`}
         confirmText="Restore Backup"
         confirmButtonClass="btn-danger"
         icon="fas fa-exclamation-triangle"
       />
+
+      {/* Two-factor key mismatch: a separate confirmation for the override */}
+      <ConfirmModal
+        isOpen={twoFaMismatch !== null}
+        onClose={() => setTwoFaMismatch(null)}
+        onConfirm={handleRestoreWithoutTwoFa}
+        title="Two-Factor Authentication Cannot Be Restored"
+        message={`${twoFaMismatch?.message ?? ''} Restore everything except two-factor authentication? Affected users will have to set up two-factor authentication again, and until they do they can sign in with their password alone.`}
+        confirmText="Restore Without 2FA"
+        confirmButtonClass="btn-danger"
+        icon="fas fa-shield-alt"
+      />
+
+      {/* Restore result: sessions have ended, so this is shown before signing out */}
+      {restoreResult && (
+        <div className="modal-overlay active">
+          <div className="modal-content" style={{ maxWidth: '520px' }}>
+            <div className="modal-header">
+              <h2 className="modal-title">
+                <i className="fas fa-check-circle" style={{ marginRight: '0.5rem' }}></i>
+                Backup Restored
+              </h2>
+            </div>
+            <div className="modal-body">
+              <p>
+                Restored {restoreResult.tables_restored} tables ({restoreResult.rows_restored}{' '}
+                rows). A backup of the previous data was saved as{' '}
+                <strong>{restoreResult.safety_backup}</strong>.
+              </p>
+              {restoreResult.two_factor_cleared_users !== undefined && (
+                <div className="alert alert-warning" role="alert">
+                  Two-factor authentication was cleared for {restoreResult.two_factor_cleared_users}{' '}
+                  user(s); they must set it up again.
+                </div>
+              )}
+              {restoreResult.warnings.length > 0 && (
+                <ul>
+                  {restoreResult.warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              )}
+              <p>All sessions have ended. Everyone, including you, must sign in again.</p>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-primary" onClick={continueToSignIn}>
+                Continue to sign in
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       <ConfirmModal

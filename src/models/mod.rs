@@ -1122,11 +1122,18 @@ pub struct BackupInfo {
 /// Metadata embedded in the backup file itself
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BackupMetadata {
+    /// Backup file format: "1.0" (fixed table list) or "2.0" (tables taken from the catalog)
     pub version: String,
     pub app_version: String,
     pub created_at: String,
     pub database_type: String,
     pub description: Option<String>,
+    /// Latest applied database migration when the backup was taken (absent in "1.0" backups)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<i64>,
+    /// Fingerprint of the TOTP encryption key; present when the backup holds 2FA enrolment
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_key_fingerprint: Option<String>,
 }
 
 /// The complete backup data envelope
@@ -1136,29 +1143,45 @@ pub struct BackupData {
     pub data: BackupDatabaseContent,
 }
 
-/// All database tables exported as JSON arrays
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct BackupDatabaseContent {
-    pub users: serde_json::Value,
-    pub inventories: serde_json::Value,
-    pub items: serde_json::Value,
-    pub categories: serde_json::Value,
-    pub tags: serde_json::Value,
-    pub item_tags: serde_json::Value,
-    pub custom_fields: serde_json::Value,
-    pub item_custom_values: serde_json::Value,
-    pub organizer_types: serde_json::Value,
-    pub organizer_options: serde_json::Value,
-    pub item_organizer_values: serde_json::Value,
-    pub user_settings: serde_json::Value,
-    pub inventory_shares: serde_json::Value,
-    pub user_access_grants: serde_json::Value,
-    pub recovery_codes: serde_json::Value,
-    #[serde(default = "default_empty_json_array")]
-    pub password_reset_tokens: serde_json::Value,
+/// Every database table as a JSON array of rows, keyed by table name.
+///
+/// The wire format is a plain JSON object of table name to rows, which is also what the old
+/// fixed-field struct serialised to, so "1.0" backups still parse.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(transparent)]
+pub struct BackupDatabaseContent(pub std::collections::BTreeMap<String, serde_json::Value>);
+
+impl BackupDatabaseContent {
+    /// Number of rows backed up for `table` (0 if absent or not an array).
+    #[must_use]
+    pub fn row_count(&self, table: &str) -> usize {
+        self.0
+            .get(table)
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    }
 }
 
-/// Default empty JSON array for optional backup fields (backward compatibility)
-fn default_empty_json_array() -> serde_json::Value {
-    serde_json::Value::Array(vec![])
+/// Options for a restore request
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct RestoreRequest {
+    /// Restore everything except two-factor enrolment (needed when the TOTP key differs)
+    #[serde(default)]
+    pub restore_without_2fa: bool,
+}
+
+/// What a restore did
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct RestoreReport {
+    pub tables_restored: usize,
+    pub rows_restored: u64,
+    /// Things the admin should know (skipped tables or columns, tables left empty)
+    pub warnings: Vec<String>,
+    /// Set when two-factor enrolment was deliberately not restored: how many users lost 2FA
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_factor_cleared_users: Option<u64>,
+    /// Name of the automatic backup taken just before the restore
+    pub safety_backup: String,
+    /// Every session ended, so everyone (including the admin) must sign in again
+    pub sessions_ended: bool,
 }

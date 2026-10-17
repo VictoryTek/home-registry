@@ -530,6 +530,19 @@ export type LoginApiResponse = LoginResponse | LoginTotpRequiredResponse;
 
 // ==================== Backup & Restore Types ====================
 
+// What a restore did (returned by POST /backup/restore/{filename})
+export interface RestoreReport {
+  tables_restored: number;
+  rows_restored: number;
+  warnings: string[];
+  // Set when two-factor enrolment was deliberately not restored: how many users lost 2FA
+  two_factor_cleared_users?: number;
+  // The automatic backup taken just before the restore
+  safety_backup: string;
+  // Every session ended: everyone must sign in again
+  sessions_ended: boolean;
+}
+
 export interface BackupInfo {
   name: string;
   date: string;

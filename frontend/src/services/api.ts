@@ -57,6 +57,7 @@ import type {
   CategorySummary,
   // Backup types
   BackupInfo,
+  RestoreReport,
   // Image types
   ImageUploadResponse,
 } from '@/types';
@@ -1127,15 +1128,18 @@ export const backupApi = {
   },
 
   // Restore from a server-side backup
-  async restore(filename: string): Promise<ApiResponse<null>> {
+  // `restoreWithout2fa` restores everything except two-factor enrolment; the server only needs
+  // it when the backup's TOTP key differs from this server's (error code `totp_key_mismatch`)
+  async restore(filename: string, restoreWithout2fa = false): Promise<ApiResponse<RestoreReport>> {
     const response = await fetchWithRetry(
       `${API_BASE}/backup/restore/${encodeURIComponent(filename)}`,
       {
         method: 'POST',
         headers: getHeaders(),
+        body: JSON.stringify({ restore_without_2fa: restoreWithout2fa }),
       }
     );
-    return handleResponse<null>(response);
+    return handleResponse<RestoreReport>(response);
   },
 
   // Delete a backup

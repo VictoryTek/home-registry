@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 7 / 19 high · 0 / 48 medium · 0 / 27 low
+**Progress:** 8 / 19 high · 0 / 48 medium · 0 / 27 low
 
 ---
 
@@ -41,9 +41,10 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 
 ### Data integrity
 
-- [ ] **H-08 — Backup/restore correctness (2FA wipe, consistent snapshot, schema drift)**
+- [x] **H-08 — Backup/restore correctness (2FA wipe, consistent snapshot, schema drift)**
   Sources: ARCH-A3, BUGS-BUG2, BUGS-BUG14. Files: `src/db/mod.rs:2694-2894`, `src/models/mod.rs:1026-1050`, `src/api/backup.rs`.
   Include `user_totp_settings`; derive the table list from the catalog; take the export in one `REPEATABLE READ` transaction; store the schema version in the backup metadata; fix the sequence-reset error path; make backup filenames collision-safe. (Backing up `uploads/` is tracked in **M-19**.)
+  Done: tables come from the catalog (`src/db/backup.rs`), export is one `REPEATABLE READ` read-only snapshot, restore is one transaction in foreign-key order with catalog-derived sequence reset, format "2.0" records `schema_version` and a TOTP key fingerprint (1.0 backups still restore), a newer-schema backup is refused, unique collision-proof file names with `create_new`, strict name validation, restore ends all sessions (`token_version` raised past both the restored and the previous value). A TOTP key mismatch refuses by default; `restore_without_2fa` restores everything but 2FA (users without an enrolment row log in with their password; there is no server-wide mandatory-2FA rule). Self-referencing foreign keys need no ordering (one INSERT per table, checked at statement end); none exist today. `numeric` columns are exported as text so no digits are lost. Known limit: a JSON `null` stored in a `jsonb` column restores as SQL NULL (only `user_settings.settings_json`, which treats both alike). Backup files still contain password and recovery-code hashes and encrypted 2FA secrets (see **L-15**); `uploads/` is **M-19**; the existing `H-09` migration will drop six tables that older backups still contain, and restore skips them with a warning.
 - [ ] **H-09 — Drop the six orphaned tables and their dead models**
   Source: ARCH-H1 (plus the model/DEAD1 part of BUGS-DEAD1). Files: `migrations/V005-V007, V013`, `src/models/mod.rs:215-312`, `src/db/mod.rs:2805-2876`. New migration (next free number; V024 is used by H-06) drops `categories`, `tags`, `item_tags`, `custom_fields`, `item_custom_values`, `password_reset_tokens`; remove from export/import. **Note:** FEAT-F3 (invite links) needs a new token table; do not reuse the dropped one.
 - [ ] **H-10 — Items must not default into inventory #1**

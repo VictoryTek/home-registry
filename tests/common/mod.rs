@@ -4,10 +4,8 @@ use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use std::env;
 use tokio_postgres::NoTls;
 
-/// Create a test database pool
-/// Uses `TEST_DATABASE_URL` env var if set, otherwise falls back to default test DB
-#[allow(dead_code)]
-pub fn create_test_pool() -> Pool {
+/// Connection settings for the test database server, pointing at `dbname`.
+fn test_db_config(dbname: Option<&str>) -> Config {
     let database_url = env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
         env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://postgres:password@localhost:5432/home_inventory_test".to_string()
@@ -37,13 +35,137 @@ pub fn create_test_pool() -> Pool {
             cfg.dbname = Some(host_db[1].to_string());
         }
     }
+    if let Some(dbname) = dbname {
+        cfg.dbname = Some(dbname.to_string());
+    }
 
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
+    cfg
+}
 
-    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+/// Create a test database pool
+/// Uses `TEST_DATABASE_URL` env var if set, otherwise falls back to default test DB
+#[allow(dead_code)]
+pub fn create_test_pool() -> Pool {
+    test_db_config(None)
+        .create_pool(Some(Runtime::Tokio1), NoTls)
         .expect("Failed to create test pool")
+}
+
+/// A database that exists only for one test.
+///
+/// Restore truncates every table, so tests of it must never run against the shared test
+/// database. This creates `home_registry_scratch_<random>` on the same server, applies every
+/// migration from `migrations/` (plus the migration bookkeeping table, with each version
+/// recorded), and drops the database again when the value goes out of scope, even if the test
+/// panics.
+#[allow(dead_code)]
+pub struct ScratchDb {
+    pub name: String,
+    pub pool: Pool,
+    /// Highest migration version applied
+    pub schema_version: i64,
+}
+
+#[allow(dead_code)]
+impl ScratchDb {
+    pub async fn create() -> Self {
+        let name = format!("home_registry_scratch_{}", uuid::Uuid::new_v4().simple());
+        let admin = test_db_config(Some("postgres"))
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("admin pool");
+        admin
+            .get()
+            .await
+            .expect("admin connection")
+            .batch_execute(&format!("CREATE DATABASE {name}"))
+            .await
+            .expect("create scratch database");
+
+        let pool = test_db_config(Some(&name))
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("scratch pool");
+        let client = pool.get().await.expect("scratch connection");
+
+        // Same bookkeeping table the migration runner keeps
+        client
+            .batch_execute(
+                "CREATE TABLE refinery_schema_history (
+                     version INT4 PRIMARY KEY, name VARCHAR(255),
+                     applied_on VARCHAR(255), checksum VARCHAR(255))",
+            )
+            .await
+            .expect("bookkeeping table");
+
+        let mut files: Vec<_> = std::fs::read_dir("migrations")
+            .expect("migrations directory")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "sql"))
+            .collect();
+        files.sort();
+        let mut schema_version = 0i64;
+        for file in files {
+            let stem = file.file_stem().unwrap().to_string_lossy().to_string();
+            let (version, migration_name) = stem
+                .trim_start_matches('V')
+                .split_once("__")
+                .expect("migration file name");
+            let version: i32 = version.parse().expect("migration version");
+            let sql = std::fs::read_to_string(&file).expect("read migration");
+            client
+                .batch_execute(&sql)
+                .await
+                .unwrap_or_else(|e| panic!("applying {stem}: {e}"));
+            client
+                .execute(
+                    "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+                     VALUES ($1, $2, 'test', 'test')",
+                    &[&version, &migration_name],
+                )
+                .await
+                .expect("record migration");
+            schema_version = i64::from(version);
+        }
+        drop(client);
+
+        Self {
+            name,
+            pool,
+            schema_version,
+        }
+    }
+}
+
+impl Drop for ScratchDb {
+    fn drop(&mut self) {
+        // Runs on its own thread and runtime so it works while the test's runtime is shutting
+        // down or unwinding from a panic. FORCE disconnects any pooled connections.
+        let name = self.name.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let Ok(admin) =
+                    test_db_config(Some("postgres")).create_pool(Some(Runtime::Tokio1), NoTls)
+                else {
+                    return;
+                };
+                if let Ok(client) = admin.get().await {
+                    let _ = client
+                        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                        .await;
+                }
+            });
+        })
+        .join();
+    }
 }
 
 /// Generate a unique test username
