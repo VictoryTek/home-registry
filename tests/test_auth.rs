@@ -700,6 +700,7 @@ async fn test_token_with_expired_claims() {
         exp: (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp() as u64,
         iat: chrono::Utc::now().timestamp() as u64,
         totp_pending: false,
+        tv: 0,
     };
 
     let token = encode(

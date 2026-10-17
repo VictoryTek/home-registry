@@ -1303,7 +1303,7 @@ impl DatabaseService {
         let rows = client
             .query(
                 "SELECT id, username, full_name, password_hash, is_admin, is_active, created_at, updated_at,
-                        recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false)
+                        recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false), token_version
                  FROM users WHERE id = $1",
                 &[&id],
             )
@@ -1321,6 +1321,7 @@ impl DatabaseService {
                 updated_at: row.get(7),
                 recovery_codes_generated_at: row.get(8),
                 recovery_codes_confirmed: row.get(9),
+                token_version: row.get(10),
             }))
         } else {
             Ok(None)
@@ -1336,7 +1337,7 @@ impl DatabaseService {
         let rows = client
             .query(
                 "SELECT id, username, full_name, password_hash, is_admin, is_active, created_at, updated_at,
-                        recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false)
+                        recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false), token_version
                  FROM users WHERE LOWER(username) = LOWER($1)",
                 &[&username],
             )
@@ -1354,6 +1355,7 @@ impl DatabaseService {
                 updated_at: row.get(7),
                 recovery_codes_generated_at: row.get(8),
                 recovery_codes_confirmed: row.get(9),
+                token_version: row.get(10),
             }))
         } else {
             Ok(None)
@@ -1402,7 +1404,7 @@ impl DatabaseService {
             .query_one(
                 "INSERT INTO users (username, full_name, password_hash, is_admin, is_active) 
                  VALUES ($1, $2, $3, $4, $5) 
-                 RETURNING id, username, full_name, password_hash, is_admin, is_active, created_at, updated_at",
+                 RETURNING id, username, full_name, password_hash, is_admin, is_active, created_at, updated_at, token_version",
                 &[&username, &full_name, &password_hash, &is_admin, &is_active],
             )
             .await?;
@@ -1418,6 +1420,7 @@ impl DatabaseService {
             updated_at: row.get(7),
             recovery_codes_generated_at: None,
             recovery_codes_confirmed: false,
+            token_version: row.get(8),
         };
 
         info!("Created new user: {} (ID: {})", user.username, user.id);
@@ -1452,7 +1455,7 @@ impl DatabaseService {
         let query = format!(
             "UPDATE users SET {} WHERE id = ${} 
              RETURNING id, username, full_name, password_hash, is_admin, is_active, created_at, updated_at,
-                       recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false)",
+                       recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false), token_version",
             fields.join(", "),
             param_count
         );
@@ -1471,6 +1474,7 @@ impl DatabaseService {
                 updated_at: row.get(7),
                 recovery_codes_generated_at: row.get(8),
                 recovery_codes_confirmed: row.get(9),
+                token_version: row.get(10),
             }))
         } else {
             Ok(None)
@@ -1499,15 +1503,26 @@ impl DatabaseService {
             values.push(full_name);
             param_count += 1;
         }
+        // Role or active-flag changes revoke the user's sessions; a save that leaves both
+        // unchanged must not sign anyone out, so compare against the stored values.
+        let mut changed_flags = Vec::new();
         if let Some(ref is_admin) = request.is_admin {
             fields.push(format!("is_admin = ${param_count}"));
+            changed_flags.push(format!("is_admin IS DISTINCT FROM ${param_count}"));
             values.push(is_admin);
             param_count += 1;
         }
         if let Some(ref is_active) = request.is_active {
             fields.push(format!("is_active = ${param_count}"));
+            changed_flags.push(format!("is_active IS DISTINCT FROM ${param_count}"));
             values.push(is_active);
             param_count += 1;
+        }
+        if !changed_flags.is_empty() {
+            fields.push(format!(
+                "token_version = token_version + CASE WHEN {} THEN 1 ELSE 0 END",
+                changed_flags.join(" OR ")
+            ));
         }
 
         if fields.is_empty() {
@@ -1520,7 +1535,7 @@ impl DatabaseService {
         let query = format!(
             "UPDATE users SET {} WHERE id = ${} 
              RETURNING id, username, full_name, password_hash, is_admin, is_active, created_at, updated_at,
-                       recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false)",
+                       recovery_codes_generated_at, COALESCE(recovery_codes_confirmed, false), token_version",
             fields.join(", "),
             param_count
         );
@@ -1539,28 +1554,52 @@ impl DatabaseService {
                 updated_at: row.get(7),
                 recovery_codes_generated_at: row.get(8),
                 recovery_codes_confirmed: row.get(9),
+                token_version: row.get(10),
             }))
         } else {
             Ok(None)
         }
     }
 
-    /// Update user password
+    /// Update a user's password and revoke all of their sessions in one statement.
+    ///
+    /// Returns the new `token_version` (use it to issue the caller a fresh token), or `None`
+    /// if the user does not exist.
     pub async fn update_user_password(
         &self,
         id: Uuid,
         password_hash: &str,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
         let client = self.pool.get().await?;
 
-        let rows_affected = client
-            .execute(
-                "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        let rows = client
+            .query(
+                "UPDATE users
+                 SET password_hash = $1, token_version = token_version + 1, updated_at = NOW()
+                 WHERE id = $2
+                 RETURNING token_version",
                 &[&password_hash, &id],
             )
             .await?;
 
-        Ok(rows_affected > 0)
+        Ok(rows.first().map(|row| row.get(0)))
+    }
+
+    /// Revoke all of a user's sessions by bumping their `token_version`.
+    /// The increment and the read are one atomic statement. `None` if the user is gone.
+    pub async fn bump_token_version(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "UPDATE users SET token_version = token_version + 1 WHERE id = $1
+                 RETURNING token_version",
+                &[&id],
+            )
+            .await?;
+        Ok(rows.first().map(|row| row.get(0)))
     }
 
     /// Delete a user
@@ -1578,11 +1617,14 @@ impl DatabaseService {
         Ok(deleted)
     }
 
-    /// Count admin users
+    /// Count active admin users (the accounts that can actually administer the system)
     pub async fn count_admin_users(&self) -> Result<i64, Box<dyn std::error::Error>> {
         let client = self.pool.get().await?;
         let row = client
-            .query_one("SELECT COUNT(*) FROM users WHERE is_admin = true", &[])
+            .query_one(
+                "SELECT COUNT(*) FROM users WHERE is_admin = true AND is_active = true",
+                &[],
+            )
             .await?;
         Ok(row.get(0))
     }
@@ -2976,10 +3018,8 @@ impl DatabaseService {
 
         for (table, rows_json) in &import_order {
             if let Some(rows) = rows_json.as_array() {
+                let query = import_row_query(table);
                 for row in rows {
-                    let query = format!(
-                        "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1)"
-                    );
                     transaction.execute(query.as_str(), &[row]).await?;
                 }
             }
@@ -3232,6 +3272,21 @@ fn build_order_by(request: &crate::models::InventoryReportRequest) -> String {
     };
 
     format!("{column} {order}")
+}
+
+/// SQL that inserts one backup row (bound as `$1`, JSON) into `table`.
+///
+/// `jsonb_populate_record` fills columns missing from the JSON with NULL, not with their
+/// defaults, so columns added after a backup was taken must be defaulted here or restoring
+/// that backup would violate NOT NULL. A value present in the backup still wins (`||`).
+#[must_use]
+pub fn import_row_query(table: &str) -> String {
+    let row = match table {
+        // Added in migration V024; backups taken before it have no such key
+        "users" => r#"'{"token_version": 0}'::jsonb || $1"#,
+        _ => "$1",
+    };
+    format!("INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, {row})")
 }
 
 fn item_from_row(row: &tokio_postgres::Row) -> Item {

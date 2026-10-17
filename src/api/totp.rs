@@ -11,13 +11,13 @@ use uuid::Uuid;
 use crate::auth::throttle::{self, Subject};
 use crate::auth::totp::{generate_totp_setup, verify_totp_code};
 use crate::auth::{
-    extract_token, generate_token, hash_password, validate_password, verify_password, verify_token,
-    PasswordWorkError,
+    extract_token, generate_token, hash_password, issue_token, validate_password, verify_password,
+    verify_token, AuthContext, PasswordWorkError,
 };
 use crate::db::DatabaseService;
 use crate::models::{
-    ApiResponse, ErrorResponse, LoginResponse, TotpDisableRequest, TotpModeRequest,
-    TotpRecoveryRequest, TotpSetupResponse, TotpStatusResponse, TotpVerifyRequest,
+    ApiResponse, ErrorResponse, LoginResponse, TotpDisableRequest, TotpDisableResponse,
+    TotpModeRequest, TotpRecoveryRequest, TotpSetupResponse, TotpStatusResponse, TotpVerifyRequest,
     TotpVerifySetupRequest, TotpVerifySetupResponse,
 };
 use crate::rate_limit::client_ip_key;
@@ -218,15 +218,46 @@ pub async fn totp_verify_setup(
         auth.username, mode_str
     );
 
+    let token = revoke_sessions_and_reissue(&db_service, &auth, "totp_enabled").await;
+
     Ok(HttpResponse::Ok().json(ApiResponse {
         success: true,
         data: Some(TotpVerifySetupResponse {
             enabled: true,
             mode: body.mode,
+            token,
         }),
         message: Some("Authenticator enabled successfully".to_string()),
         error: None,
     }))
+}
+
+/// Revoke the account's other sessions after its authentication strength changed (TOTP enabled
+/// or disabled) and issue the caller a token for the new session generation.
+///
+/// Returns `None` if the bump or signing failed; the change itself already succeeded, so the
+/// failure is logged and the response simply carries no fresh token.
+async fn revoke_sessions_and_reissue(
+    db: &DatabaseService,
+    auth: &AuthContext,
+    reason: &str,
+) -> Option<String> {
+    let version = match db.bump_token_version(auth.user_id).await {
+        Ok(Some(version)) => version,
+        Ok(None) => return None,
+        Err(e) => {
+            error!("Error revoking sessions after {reason}: {e}");
+            return None;
+        },
+    };
+    crate::api::auth::audit_sessions_revoked(auth.user_id, &auth.user_id.to_string(), reason);
+    match issue_token(auth.user_id, &auth.username, auth.is_admin, version) {
+        Ok(token) => Some(token),
+        Err(e) => {
+            error!("Error issuing token after {reason}: {e}");
+            None
+        },
+    }
 }
 
 // ==================== TOTP Verify (Login 2FA) ====================
@@ -296,6 +327,11 @@ pub async fn totp_verify(
             }));
         },
     };
+
+    // A login started before the account's sessions were revoked cannot be completed
+    if claims.tv != user.token_version {
+        return Ok(crate::api::auth::session_revoked_response());
+    }
 
     // Get TOTP settings
     let settings = match db_service.get_totp_settings(user_id).await {
@@ -502,16 +538,26 @@ pub async fn totp_recover(
     };
 
     // Update password
-    if let Err(e) = db_service
+    match db_service
         .update_user_password(user.id, &password_hash)
         .await
     {
-        error!("Error updating password: {}", e);
-        return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-            success: false,
-            error: "Failed to reset password".to_string(),
-            message: None,
-        }));
+        Ok(Some(_)) => {},
+        Ok(None) => {
+            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Invalid credentials".to_string(),
+                message: Some("Invalid username, code, or password".to_string()),
+            }));
+        },
+        Err(e) => {
+            error!("Error updating password: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Failed to reset password".to_string(),
+                message: None,
+            }));
+        },
     }
 
     // Reset failed attempts and update last used
@@ -522,6 +568,7 @@ pub async fn totp_recover(
         "User {} reset password via TOTP authenticator",
         user.username
     );
+    crate::api::auth::audit_sessions_revoked(user.id, "self_service", "totp_password_reset");
 
     Ok(HttpResponse::Ok().json(ApiResponse {
         success: true,
@@ -648,9 +695,10 @@ pub async fn totp_disable(
     match db_service.delete_totp_settings(auth.user_id).await {
         Ok(true) => {
             info!("TOTP disabled for user {}", auth.username);
-            Ok(HttpResponse::Ok().json(ApiResponse::<()> {
+            let token = revoke_sessions_and_reissue(&db_service, &auth, "totp_disabled").await;
+            Ok(HttpResponse::Ok().json(ApiResponse {
                 success: true,
-                data: None,
+                data: Some(TotpDisableResponse { token }),
                 message: Some("Authenticator disabled successfully".to_string()),
                 error: None,
             }))

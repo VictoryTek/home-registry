@@ -4,6 +4,7 @@ import {
   UserManagement,
   AllAccessManagement,
   RecoveryCodesSection,
+  SessionsSection,
   TotpSettings,
   BackupRestoreSection,
 } from '@/components';
@@ -277,6 +278,23 @@ export function SettingsPage() {
             </div>
 
             <RecoveryCodesSection />
+          </section>
+
+          {/* Active Sessions */}
+          <section className="settings-section">
+            <div className="settings-section-header">
+              <div className="settings-section-icon">
+                <i className="fas fa-desktop"></i>
+              </div>
+              <div>
+                <h2 className="settings-section-title">Active Sessions</h2>
+                <p className="settings-section-description">
+                  End sign-ins on your other devices, for example after losing one
+                </p>
+              </div>
+            </div>
+
+            <SessionsSection />
           </section>
 
           {/* Two-Factor Authentication */}

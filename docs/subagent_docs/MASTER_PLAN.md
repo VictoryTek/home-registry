@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 5 / 19 high · 0 / 47 medium · 0 / 25 low
+**Progress:** 6 / 19 high · 0 / 47 medium · 0 / 27 low
 
 ---
 
@@ -31,9 +31,10 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
   Also cover password-verifying authenticated endpoints (`PUT /auth/password`, `POST /auth/recovery-codes/generate`): a stolen token can otherwise guess the password there.
   Build the limiter backend once (not per worker), correct `interval/max_requests` (currently ~5,000 req/s), guard `RATE_LIMIT_RPS=0`, key on real client IP behind a trusted proxy, and add per-account/per-IP attempt limits on login/register/recovery. Replace "verify against 10 hashes" for recovery codes with a single lookup.
   Done in H-05 except the single-lookup recovery codes, which moved to **M-47**.
-- [ ] **H-06 — Token versioning, auth context from the DB user, and "sign out everywhere"**
+- [x] **H-06 — Token versioning, auth context from the DB user, and "sign out everywhere"**
   Sources: ARCH-A5, BUGS-SEC8, FEAT-G1. Files: `src/auth/mod.rs:143-217, 280-288`, `src/api/auth.rs:63-102`, new migration (`users.token_version`).
   Build `AuthContext.is_admin` from the loaded row (demoted admins lose access immediately), invalidate tokens on password change/reset/recovery/deactivation, add the Settings button.
+  Done: `users.token_version` (migration V024), `tv` claim, auth context from the stored user, `POST /auth/logout-all` ("Sign out all other devices"), fresh token after password change / TOTP enable / disable. The per-user version counter is standard practice, not a verified OWASP source (the OWASP JWT cheat sheet could not be retrieved). Plain logout remains client-side only; see **L-27**.
 - [ ] **H-07 — One source of truth for "who can access this inventory"**
   Source: ARCH-A2. Files: `src/db/mod.rs:1765-1869, 1919-1961, 2362-2384, 2397-2500`. Four copies of the owner/share/grant rule; `get_effective_permissions` falls back to `View` on a parse error (fails open). Consolidate in SQL (view/function) and have the Rust permission object derive from it.
 
@@ -43,7 +44,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
   Sources: ARCH-A3, BUGS-BUG2, BUGS-BUG14. Files: `src/db/mod.rs:2694-2894`, `src/models/mod.rs:1026-1050`, `src/api/backup.rs`.
   Include `user_totp_settings`; derive the table list from the catalog; take the export in one `REPEATABLE READ` transaction; store the schema version in the backup metadata; fix the sequence-reset error path; make backup filenames collision-safe. (Backing up `uploads/` is tracked in **M-19**.)
 - [ ] **H-09 — Drop the six orphaned tables and their dead models**
-  Source: ARCH-H1 (plus the model/DEAD1 part of BUGS-DEAD1). Files: `migrations/V005-V007, V013`, `src/models/mod.rs:215-312`, `src/db/mod.rs:2805-2876`. New migration `V024` drops `categories`, `tags`, `item_tags`, `custom_fields`, `item_custom_values`, `password_reset_tokens`; remove from export/import. **Note:** FEAT-F3 (invite links) needs a new token table; do not reuse the dropped one.
+  Source: ARCH-H1 (plus the model/DEAD1 part of BUGS-DEAD1). Files: `migrations/V005-V007, V013`, `src/models/mod.rs:215-312`, `src/db/mod.rs:2805-2876`. New migration (next free number; V024 is used by H-06) drops `categories`, `tags`, `item_tags`, `custom_fields`, `item_custom_values`, `password_reset_tokens`; remove from export/import. **Note:** FEAT-F3 (invite links) needs a new token table; do not reuse the dropped one.
 - [ ] **H-10 — Items must not default into inventory #1**
   Sources: BUGS-BUG3, ARCH-H4 (the `DEFAULT 1` part). Files: `src/db/mod.rs:225`, `src/models/mod.rs:60`, `migrations/V001-V003`. Make `inventory_id` required in `CreateItemRequest`, and drop the column default in a new migration.
 
@@ -79,6 +80,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [ ] **M-01 — TOTP replay protection and atomic attempt counting** — BUGS-SEC6 (+ the `totp_setup` counter reset). `src/api/totp.rs`, `src/db/mod.rs:3048-3085`.
   Note: RFC 6238 §5.2 says a verifier MUST NOT accept the same OTP twice. `totp-rs` is pinned at `=5.6.0`, whose `check()` returns a bool (no matched step), so store and compare the last-used step ourselves; do not copy the 6.x `check_current` examples. Also fix `totp_setup`'s "already enabled" check, which skips on a DB error (`src/api/totp.rs:60`).
 - [ ] **M-02 — Changing/downgrading TOTP mode requires re-authentication** — BUGS-SEC7. `src/api/totp.rs:524-580`.
+  Also revoke other sessions (`bump_token_version`, fresh token to the caller) when the mode is downgraded; H-06 only covers enable and disable.
 - [ ] **M-03 — CSV formula injection** — BUGS-SEC9. `src/api/mod.rs:1231-1289`; prefix `= + - @ \t \r` cells.
 - [ ] **M-04 — Account enumeration and login timing** — BUGS-SEC10. Dummy-hash verify for unknown users; check `is_active` after the password.
 - [ ] **M-05 — Typed `AppError` (`ResponseError`), proper DB error classification, no internal details to clients** — ARCH-A7, BUGS-ERR3, BUGS-SEC11. Replaces 125 hand-built 500s and string-matching on `"duplicate"`/`"unique"`.
@@ -168,6 +170,8 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [ ] **L-23 — PWA share target and app shortcuts** — FEAT-A3.
 - [ ] **L-24 — Personal API tokens** — FEAT-A4. After **H-06**.
 - [ ] **L-25 — Estimated current value (depreciation)** — FEAT-C11.
+- [ ] **L-26 — Make the `tv` claim required (remove the compatibility shim)** — `Claims.tv` defaults to 0 so tokens issued before migration V024 keep working. Once every such token has expired (`JWT_TOKEN_LIFETIME_HOURS`, 24 h by default), remove `#[serde(default)]` and the `TODO(L-26)` in `src/models/mod.rs`. Do it in the first release cut at least two days after the release that ships V024, and drop the legacy-token test in `tests/test_sessions.rs`.
+- [ ] **L-27 — Per-token revocation for ordinary logout** — Plain logout only clears local storage; the token stays valid until expiry (the OWASP Session Management cheat sheet expects server-side invalidation). Add a `jti` claim and a denylist of revoked `jti` values with expiry pruning (in memory, or a small table so it survives restarts and multiple instances), checked in `get_auth_context_from_request`; call it from logout. Until then, never describe logout as revoking the token; point to "Sign out all other devices" or a password change.
 
 ---
 

@@ -49,6 +49,7 @@ import type {
   TotpSetupResponse,
   TotpVerifySetupResponse,
   TotpMode,
+  SessionTokenResponse,
   // Report types
   InventoryReportParams,
   InventoryReportData,
@@ -62,6 +63,32 @@ import type {
 
 const API_BASE = '/api';
 const TOKEN_KEY = 'home_registry_token';
+// Set (in sessionStorage) when the server reports a revoked session, so the login screen can say why
+export const SESSION_NOTICE_KEY = 'home_registry_session_notice';
+// Fired in this tab after a fresh token was stored, so AuthContext can pick it up
+export const TOKEN_CHANGED_EVENT = 'home_registry_token_changed';
+
+// Store a fresh token issued after this device's own session generation changed
+// (password change, "sign out other devices", TOTP enable/disable)
+function adoptSessionToken(token: string | undefined): void {
+  if (!token) {
+    return;
+  }
+  localStorage.setItem(TOKEN_KEY, token);
+  window.dispatchEvent(new Event(TOKEN_CHANGED_EVENT));
+}
+
+// The bearer token a request was sent with, if any
+function sentBearerToken(options: RequestInit): string | null {
+  const headers = options.headers;
+  if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+    const auth = (headers as Record<string, string>).Authorization;
+    if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+      return auth.slice('Bearer '.length);
+    }
+  }
+  return null;
+}
 
 // Get auth token from localStorage
 function getToken(): string | null {
@@ -87,6 +114,15 @@ function getHeaders(includeAuth = true): Record<string, string> {
 async function handleResponse<T>(response: Response): Promise<ApiResponse<T>> {
   // Handle 401 Unauthorized - redirect to login
   if (response.status === 401) {
+    // Remember why when the server says the session was revoked, so the login page can explain
+    try {
+      const body = (await response.clone().json()) as { error?: string };
+      if (body.error === 'session_revoked') {
+        sessionStorage.setItem(SESSION_NOTICE_KEY, 'revoked');
+      }
+    } catch {
+      // Not a JSON body; nothing to record
+    }
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem('home_registry_user');
     // Only redirect if not already on login/setup page
@@ -201,10 +237,31 @@ async function fetchWithRetry(
   maxRetries = 5
 ): Promise<Response> {
   let lastError: Error | null = null;
+  let init = options;
+  let retriedWithNewerToken = false;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(url, init);
+
+      // Another tab of this browser may have replaced the token (password change, sign out of
+      // other devices) after this request was built. Retry once with the newer token before
+      // the caller treats the 401 as a signed-out session.
+      if (response.status === 401 && !retriedWithNewerToken) {
+        const sent = sentBearerToken(init);
+        const current = getToken();
+        if (sent && current && current !== sent) {
+          retriedWithNewerToken = true;
+          init = {
+            ...init,
+            headers: {
+              ...(init.headers as Record<string, string>),
+              Authorization: `Bearer ${current}`,
+            },
+          };
+          continue;
+        }
+      }
 
       // Handle rate limiting (429 Too Many Requests)
       if (response.status === 429) {
@@ -586,13 +643,27 @@ export const authApi = {
   },
 
   // Change password
-  async changePassword(data: ChangePasswordRequest): Promise<ApiResponse<{ message: string }>> {
+  // The server signs out the account's other devices and returns a fresh token for this one
+  async changePassword(data: ChangePasswordRequest): Promise<ApiResponse<SessionTokenResponse>> {
     const response = await fetchWithRetry(`${API_BASE}/auth/password`, {
       method: 'PUT',
       headers: getHeaders(),
       body: JSON.stringify(data),
     });
-    return handleResponse<{ message: string }>(response);
+    const result = await handleResponse<SessionTokenResponse>(response);
+    adoptSessionToken(result.data?.token);
+    return result;
+  },
+
+  // Sign out every other device; this device stays signed in with a fresh token
+  async logoutAllDevices(): Promise<ApiResponse<SessionTokenResponse>> {
+    const response = await fetchWithRetry(`${API_BASE}/auth/logout-all`, {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    const result = await handleResponse<SessionTokenResponse>(response);
+    adoptSessionToken(result.data?.token);
+    return result;
   },
 
   // Get user settings
@@ -863,7 +934,9 @@ export const authApi = {
       headers: getHeaders(),
       body: JSON.stringify({ code, mode }),
     });
-    return handleResponse<TotpVerifySetupResponse>(response);
+    const result = await handleResponse<TotpVerifySetupResponse>(response);
+    adoptSessionToken(result.data?.token);
+    return result;
   },
 
   // Verify TOTP during login (uses partial_token)
@@ -908,13 +981,15 @@ export const authApi = {
   },
 
   // Disable TOTP (requires password confirmation)
-  async disableTotp(password: string): Promise<ApiResponse<void>> {
+  async disableTotp(password: string): Promise<ApiResponse<{ token?: string }>> {
     const response = await fetchWithRetry(`${API_BASE}/auth/totp`, {
       method: 'DELETE',
       headers: getHeaders(),
       body: JSON.stringify({ password }),
     });
-    return handleResponse<undefined>(response);
+    const result = await handleResponse<{ token?: string }>(response);
+    adoptSessionToken(result.data?.token);
+    return result;
   },
 };
 

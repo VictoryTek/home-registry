@@ -143,8 +143,21 @@ pub fn jwt_token_lifetime_hours() -> i64 {
         .unwrap_or(24) // Default to 24 hours
 }
 
-/// Generate a JWT token for a user
+/// Generate a JWT token for a user at their current session generation
 pub fn generate_token(user: &User) -> Result<String, jsonwebtoken::errors::Error> {
+    issue_token(user.id, &user.username, user.is_admin, user.token_version)
+}
+
+/// Generate a JWT token for an explicit session generation.
+///
+/// Used right after a revocation: the caller passes the `token_version` returned by the atomic
+/// bump so the fresh token matches the row it was just written to.
+pub fn issue_token(
+    user_id: Uuid,
+    username: &str,
+    is_admin: bool,
+    token_version: i32,
+) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now();
     let token_lifetime_hours = jwt_token_lifetime_hours();
     // Safe cast: Unix timestamps are always positive, max(0) ensures non-negative
@@ -157,9 +170,9 @@ pub fn generate_token(user: &User) -> Result<String, jsonwebtoken::errors::Error
         .max(0) as u64;
 
     let claims = Claims {
-        sub: user.id.to_string(),
-        username: user.username.clone(),
-        is_admin: user.is_admin,
+        sub: user_id.to_string(),
+        username: username.to_string(),
+        is_admin,
         exp: expiration,
         #[allow(
             clippy::cast_sign_loss,
@@ -167,6 +180,7 @@ pub fn generate_token(user: &User) -> Result<String, jsonwebtoken::errors::Error
         )]
         iat: now.timestamp().max(0) as u64,
         totp_pending: false,
+        tv: token_version,
     };
 
     let header = Header::new(Algorithm::HS256);
@@ -200,6 +214,7 @@ pub fn generate_partial_token(user: &User) -> Result<String, jsonwebtoken::error
         )]
         iat: now.timestamp().max(0) as u64,
         totp_pending: true,
+        tv: user.token_version,
     };
 
     let header = Header::new(Algorithm::HS256);
@@ -356,12 +371,15 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
-    pub fn from_claims(claims: &Claims) -> Result<Self, uuid::Error> {
-        Ok(Self {
-            user_id: Uuid::parse_str(&claims.sub)?,
-            username: claims.username.clone(),
-            is_admin: claims.is_admin,
-        })
+    /// Build the context from the stored user, never from token claims, so a demoted or
+    /// renamed account is reflected immediately.
+    #[must_use]
+    pub fn from_user(user: &User) -> Self {
+        Self {
+            user_id: user.id,
+            username: user.username.clone(),
+            is_admin: user.is_admin,
+        }
     }
 }
 
@@ -430,6 +448,7 @@ pub fn create_token(user_id: &Uuid, username: &str) -> Result<String, jsonwebtok
         updated_at: Utc::now(),
         recovery_codes_generated_at: None, // Not generated initially
         recovery_codes_confirmed: false,   // Not confirmed initially
+        token_version: 0,
     };
     generate_token(&user)
 }

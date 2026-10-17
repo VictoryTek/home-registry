@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
+import { SESSION_NOTICE_KEY } from '@/services/api';
 import '@/styles/auth.css';
 
 export function LoginPage() {
@@ -10,6 +11,25 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [totpCode, setTotpCode] = useState('');
+
+  // Explain a forced sign-out: the server revoked the session (password changed, signed out of
+  // other devices, role changed). Read once; removed after mount so a remount still shows it.
+  const [sessionNotice] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(SESSION_NOTICE_KEY) === 'revoked'
+        ? 'Your session ended because your account was changed or you signed out of all devices'
+        : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.removeItem(SESSION_NOTICE_KEY);
+    } catch {
+      // sessionStorage unavailable; nothing to clear
+    }
+  }, []);
 
   const [formData, setFormData] = useState({
     username: '',
@@ -204,6 +224,12 @@ export function LoginPage() {
             <h1 className="auth-title">Welcome Back</h1>
             <p className="auth-subtitle">Sign in to manage your inventory</p>
           </div>
+
+          {sessionNotice && !error && (
+            <div className="alert alert-warning" role="status" style={{ marginBottom: '1rem' }}>
+              <i className="fas fa-info-circle"></i> {sessionNotice}
+            </div>
+          )}
 
           {error && (
             <div className="auth-error" role="alert">

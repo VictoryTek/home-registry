@@ -13,6 +13,7 @@ export { UserManagement } from './UserManagement';
 export { ShareInventoryModal } from './ShareInventoryModal';
 export { AllAccessManagement } from './AllAccessManagement';
 export { RecoveryCodesSection } from './RecoveryCodesSection';
+export { SessionsSection } from './SessionsSection';
 export { TotpSettings } from './TotpSettings';
 export { BackupRestoreSection } from './BackupRestoreSection';
 export { InstructionsModal } from './InstructionsModal';

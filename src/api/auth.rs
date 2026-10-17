@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use crate::auth::throttle::{self, Subject};
 use crate::auth::{
-    extract_token, generate_partial_token, generate_token, hash_password, validate_password,
-    validate_username, verify_against_dummy, verify_password, verify_token, AuthContext,
-    PasswordWorkError, ARGON2_RETRY_AFTER_SECS,
+    extract_token, generate_partial_token, generate_token, hash_password, issue_token,
+    validate_password, validate_username, verify_against_dummy, verify_password, verify_token,
+    AuthContext, PasswordWorkError, ARGON2_RETRY_AFTER_SECS,
 };
 use crate::db::DatabaseService;
 use crate::models::{
@@ -22,9 +22,9 @@ use crate::models::{
     ConfirmRecoveryCodesRequest, CreateInventoryShareRequest, CreateUserAccessGrantRequest,
     ErrorResponse, GenerateRecoveryCodesRequest, InitialSetupRequest, LoginRequest, LoginResponse,
     LoginTotpRequiredResponse, RecoveryCodeUsedResponse, RecoveryCodesResponse,
-    RecoveryCodesStatus, SetupStatusResponse, TransferOwnershipRequest, TransferOwnershipResponse,
-    UpdateInventoryShareRequest, UpdateProfileRequest, UpdateUserSettingsRequest,
-    UseRecoveryCodeRequest, UserResponse,
+    RecoveryCodesStatus, SessionTokenResponse, SetupStatusResponse, TransferOwnershipRequest,
+    TransferOwnershipResponse, UpdateInventoryShareRequest, UpdateProfileRequest,
+    UpdateUserSettingsRequest, UseRecoveryCodeRequest, UserResponse,
 };
 use crate::rate_limit::client_ip_key;
 
@@ -55,6 +55,31 @@ pub(crate) fn busy_response() -> HttpResponse {
             error: "Server busy. Please try again in a moment.".to_string(),
             message: None,
         })
+}
+
+/// 401 for a token whose session generation no longer matches the account (password changed,
+/// role changed, signed out of other devices, ...). The login page keys its notice off the
+/// `session_revoked` error code.
+pub(crate) fn session_revoked_response() -> HttpResponse {
+    HttpResponse::Unauthorized().json(ErrorResponse {
+        success: false,
+        error: "session_revoked".to_string(),
+        message: Some(
+            "Your session ended because your account was changed or you signed out of all devices"
+                .to_string(),
+        ),
+    })
+}
+
+/// Audit trail for session revocations. Records who and why, never token material.
+pub(crate) fn audit_sessions_revoked(subject: Uuid, actor: &str, reason: &str) {
+    info!(target: "audit", "sessions_revoked subject={subject} actor={actor} reason={reason}");
+}
+
+/// Whether `target` is the only active admin (removing, demoting or deactivating them would
+/// leave nobody able to administer the system).
+async fn is_last_active_admin(db: &DatabaseService, target: &crate::models::User) -> bool {
+    target.is_admin && target.is_active && db.count_admin_users().await.unwrap_or(0) <= 1
 }
 
 /// Extract and verify auth context from request
@@ -90,7 +115,7 @@ pub async fn get_auth_context_from_request(
         }));
     }
 
-    let Ok(auth_ctx) = AuthContext::from_claims(&claims) else {
+    let Ok(user_id) = Uuid::parse_str(&claims.sub) else {
         return Err(HttpResponse::Unauthorized().json(ErrorResponse {
             success: false,
             error: "Invalid user ID in token".to_string(),
@@ -98,9 +123,9 @@ pub async fn get_auth_context_from_request(
         }));
     };
 
-    // Verify user still exists and is active
+    // One read of the user row gives existence, active flag, role, name and session generation
     let db_service = DatabaseService::new(pool.clone());
-    match db_service.get_user_by_id(auth_ctx.user_id).await {
+    let auth_ctx = match db_service.get_user_by_id(user_id).await {
         Ok(Some(user)) => {
             if !user.is_active {
                 return Err(HttpResponse::Forbidden().json(ErrorResponse {
@@ -111,6 +136,10 @@ pub async fn get_auth_context_from_request(
                     ),
                 }));
             }
+            if claims.tv != user.token_version {
+                return Err(session_revoked_response());
+            }
+            AuthContext::from_user(&user)
         },
         Ok(None) => {
             return Err(HttpResponse::Unauthorized().json(ErrorResponse {
@@ -127,7 +156,7 @@ pub async fn get_auth_context_from_request(
                 message: Some("Unable to verify user".to_string()),
             }));
         },
-    }
+    };
 
     Ok(auth_ctx)
 }
@@ -749,25 +778,115 @@ pub async fn change_password(
         },
     };
 
-    // Update password
-    if let Err(e) = db_service
+    // Update password; this also revokes every other session of the account
+    let new_version = match db_service
         .update_user_password(auth_ctx.user_id, &password_hash)
         .await
     {
-        error!("Error updating password: {}", e);
-        return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-            success: false,
-            error: "Failed to update password".to_string(),
-            message: None,
-        }));
-    }
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            return Ok(HttpResponse::NotFound().json(ErrorResponse {
+                success: false,
+                error: "User not found".to_string(),
+                message: None,
+            }));
+        },
+        Err(e) => {
+            error!("Error updating password: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Failed to update password".to_string(),
+                message: None,
+            }));
+        },
+    };
 
     info!("User {} changed their password", auth_ctx.username);
+    audit_sessions_revoked(
+        auth_ctx.user_id,
+        &auth_ctx.user_id.to_string(),
+        "password_change",
+    );
+
+    // The current device stays signed in with a token for the new session generation
+    let token = match issue_token(
+        auth_ctx.user_id,
+        &auth_ctx.username,
+        auth_ctx.is_admin,
+        new_version,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Error generating token after password change: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Password changed, but a new session token could not be issued. \
+                        Please sign in again."
+                    .to_string(),
+                message: None,
+            }));
+        },
+    };
 
     Ok(HttpResponse::Ok().json(ApiResponse {
         success: true,
-        data: None::<()>,
+        data: Some(SessionTokenResponse { token }),
         message: Some("Password changed successfully".to_string()),
+        error: None,
+    }))
+}
+
+/// Sign out every other device: bump the session generation and hand the caller a fresh token
+#[post("/auth/logout-all")]
+pub async fn logout_all_devices(pool: web::Data<Pool>, req: HttpRequest) -> Result<impl Responder> {
+    let auth_ctx = match get_auth_context_from_request(&req, pool.get_ref()).await {
+        Ok(ctx) => ctx,
+        Err(response) => return Ok(response),
+    };
+
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+    let new_version = match db_service.bump_token_version(auth_ctx.user_id).await {
+        Ok(Some(version)) => version,
+        Ok(None) => return Ok(session_revoked_response()),
+        Err(e) => {
+            error!("Error revoking sessions: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Failed to sign out other devices".to_string(),
+                message: None,
+            }));
+        },
+    };
+
+    audit_sessions_revoked(
+        auth_ctx.user_id,
+        &auth_ctx.user_id.to_string(),
+        "logout_all_devices",
+    );
+
+    let token = match issue_token(
+        auth_ctx.user_id,
+        &auth_ctx.username,
+        auth_ctx.is_admin,
+        new_version,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Error generating token after revoking sessions: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Other devices were signed out, but a new session token could not be \
+                        issued. Please sign in again."
+                    .to_string(),
+                message: None,
+            }));
+        },
+    };
+
+    Ok(HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        data: Some(SessionTokenResponse { token }),
+        message: Some("Signed out all other devices".to_string()),
         error: None,
     }))
 }
@@ -1052,15 +1171,20 @@ pub async fn admin_update_user(
         }
     }
 
-    // Protect last admin
-    if let Some(false) = body.is_admin {
-        let admin_count = db_service.count_admin_users().await.unwrap_or(0);
-        if admin_count <= 1 {
-            let target_user = db_service.get_user_by_id(user_id).await.ok().flatten();
-            if target_user.is_some_and(|u| u.is_admin) {
+    // The target as stored before this request (used for the last-admin guard and audit)
+    let target_before = db_service.get_user_by_id(user_id).await.ok().flatten();
+    // Session generation to compare the final state against, so only role/active changes are
+    // logged as such (a password reset bumps it separately, above)
+    let mut baseline_version = target_before.as_ref().map(|u| u.token_version);
+
+    // Protect the last active admin from demotion or deactivation
+    if body.is_admin == Some(false) || body.is_active == Some(false) {
+        if let Some(ref target) = target_before {
+            if is_last_active_admin(&db_service, target).await {
                 return Ok(HttpResponse::BadRequest().json(ErrorResponse {
                     success: false,
-                    error: "Cannot remove admin privileges from the last admin".to_string(),
+                    error: "Cannot remove admin privileges from, or deactivate, the last admin"
+                        .to_string(),
                     message: None,
                 }));
             }
@@ -1092,16 +1216,28 @@ pub async fn admin_update_user(
             },
         };
 
-        if let Err(e) = db_service
+        match db_service
             .update_user_password(user_id, &password_hash)
             .await
         {
-            error!("Error updating user password: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: format!("Failed to update password: {e}"),
-                message: None,
-            }));
+            Ok(Some(version)) => {
+                // The reset already bumped the version; later changes are compared to it
+                baseline_version = Some(version);
+                audit_sessions_revoked(
+                    user_id,
+                    &auth_ctx.user_id.to_string(),
+                    "admin_password_reset",
+                );
+            },
+            Ok(None) => {},
+            Err(e) => {
+                error!("Error updating user password: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to update password: {e}"),
+                    message: None,
+                }));
+            },
         }
 
         info!(
@@ -1116,6 +1252,13 @@ pub async fn admin_update_user(
     {
         Ok(Some(user)) => {
             info!("Admin updated user: {}", user.username);
+            if baseline_version.is_some_and(|before| before != user.token_version) {
+                audit_sessions_revoked(
+                    user.id,
+                    &auth_ctx.user_id.to_string(),
+                    "admin_role_or_active_change",
+                );
+            }
             Ok(HttpResponse::Ok().json(ApiResponse {
                 success: true,
                 data: Some(UserResponse::from(user)),
@@ -1184,15 +1327,12 @@ pub async fn admin_delete_user(
         },
     };
 
-    if target_user.is_admin {
-        let admin_count = db_service.count_admin_users().await.unwrap_or(0);
-        if admin_count <= 1 {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Cannot delete the last admin".to_string(),
-                message: None,
-            }));
-        }
+    if is_last_active_admin(&db_service, &target_user).await {
+        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Cannot delete the last admin".to_string(),
+            message: None,
+        }));
     }
 
     match db_service.delete_user(user_id).await {
@@ -2335,16 +2475,20 @@ pub async fn use_recovery_code(
     };
 
     // Update password
-    if let Err(e) = db_service
+    match db_service
         .update_user_password(user.id, &new_password_hash)
         .await
     {
-        error!("Error updating password: {}", e);
-        return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-            success: false,
-            error: "Failed to reset password".to_string(),
-            message: None,
-        }));
+        Ok(Some(_)) => {},
+        Ok(None) => return Ok(invalid()),
+        Err(e) => {
+            error!("Error updating password: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Failed to reset password".to_string(),
+                message: None,
+            }));
+        },
     }
 
     // Mark recovery code as used
@@ -2363,6 +2507,7 @@ pub async fn use_recovery_code(
         "User {} reset password using recovery code. {} codes remaining.",
         user.username, remaining
     );
+    audit_sessions_revoked(user.id, "self_service", "recovery_code_password_reset");
 
     Ok(HttpResponse::Ok().json(ApiResponse {
         success: true,

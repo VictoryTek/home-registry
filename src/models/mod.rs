@@ -425,6 +425,9 @@ pub struct User {
     pub recovery_codes_generated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub recovery_codes_confirmed: bool,
+    /// Session generation counter; tokens carrying a different value are rejected.
+    #[serde(skip_serializing, default)]
+    pub token_version: i32,
 }
 
 /// User response without sensitive data (for API responses)
@@ -525,6 +528,25 @@ pub struct Claims {
     pub iat: u64, // Issued at (Unix timestamp)
     #[serde(default)]
     pub totp_pending: bool, // True if user needs to complete TOTP verification
+    /// Session generation (`users.token_version`) at issue time.
+    // TODO(L-26): make required once every token issued before migration V024 has expired
+    // (JWT_TOKEN_LIFETIME_HOURS, 24 h by default); until then a missing claim means 0.
+    #[serde(default)]
+    pub tv: i32,
+}
+
+/// A freshly issued session token (returned when the current device must stay signed in
+/// after the account's other sessions were revoked).
+#[derive(Serialize, Debug)]
+pub struct SessionTokenResponse {
+    pub token: String,
+}
+
+/// Response after disabling TOTP; carries a fresh token because other sessions were revoked.
+#[derive(Serialize, Debug)]
+pub struct TotpDisableResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 // ==================== Permission Models ====================
@@ -969,6 +991,9 @@ pub struct TotpVerifySetupRequest {
 pub struct TotpVerifySetupResponse {
     pub enabled: bool,
     pub mode: TotpMode,
+    /// Fresh token: enabling TOTP revokes the account's other sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// Request to verify TOTP during login

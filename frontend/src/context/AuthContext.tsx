@@ -6,7 +6,7 @@ import type {
   DismissedWarranties,
   LoginTotpRequiredResponse,
 } from '@/types';
-import { authApi } from '@/services/api';
+import { authApi, TOKEN_CHANGED_EVENT } from '@/services/api';
 
 // Storage keys - similar to Humidor
 const TOKEN_KEY = 'home_registry_token';
@@ -48,6 +48,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
   const [totpRequired, setTotpRequired] = useState<LoginTotpRequiredResponse | null>(null);
+
+  // Pick up a replaced token: from this tab (fresh token after a password change or "sign out
+  // other devices") or from another tab of this browser (storage event). Without this, tabs
+  // keep using the superseded token and get signed out by the next request.
+  useEffect(() => {
+    const syncToken = () => {
+      const stored = localStorage.getItem(TOKEN_KEY);
+      if (stored) {
+        setToken(stored);
+      }
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === TOKEN_KEY) {
+        syncToken();
+      }
+    };
+    window.addEventListener(TOKEN_CHANGED_EVENT, syncToken);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(TOKEN_CHANGED_EVENT, syncToken);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   // Check for existing auth on mount
   useEffect(() => {

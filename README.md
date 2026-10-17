@@ -217,6 +217,10 @@ The application supports the following configuration through environment variabl
 - **Use Case**: Protects your server from being overwhelmed by aggressive API clients, accidental infinite loops, or potential DoS attacks.
 - **Production Recommendation**: Start with `RPS: 100` and `BURST: 200`, then adjust based on your usage patterns and server capacity.
 
+**Sessions and sign-out:**
+- The **Sign out** button only clears the token stored in your browser. The token itself stays valid until it expires (`JWT_TOKEN_LIFETIME_HOURS`, default 24 hours); logging out does not revoke it.
+- To really end sign-ins on other devices, use **Settings → Active Sessions → Sign out all other devices** (`POST /api/auth/logout-all`). Changing your password or turning two-factor authentication on or off does the same automatically, and the device you do it on stays signed in. An administrator resetting your password, deactivating you or changing your role signs you out on every device.
+
 ## Nix / NixOS Deployment
 
 In addition to the Docker path above, home-registry ships a [Nix flake](https://nixos.wiki/wiki/Flakes)

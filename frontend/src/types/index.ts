@@ -492,6 +492,13 @@ export interface TotpVerifySetupRequest {
 export interface TotpVerifySetupResponse {
   enabled: boolean;
   mode: TotpMode;
+  // Fresh token: enabling TOTP signs out the account's other devices
+  token?: string;
+}
+
+// A fresh session token returned after this device's session generation changed
+export interface SessionTokenResponse {
+  token: string;
 }
 
 export interface TotpVerifyRequest {
