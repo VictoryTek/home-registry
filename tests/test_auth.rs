@@ -18,7 +18,7 @@ fn test_password_hashing() {
     let hash = home_registry::auth::hash_password_sync(password).expect("Failed to hash password");
 
     // Hash should not be empty
-    assert!(!hash.is_empty());
+    assert_ne!(hash, "");
 
     // Hash should not equal the password
     assert_ne!(hash, password);
@@ -89,7 +89,7 @@ fn test_jwt_token_creation() {
     let token = create_token(&user_id, username).expect("Failed to create token");
 
     // Token should not be empty
-    assert!(!token.is_empty());
+    assert_ne!(token, "");
 
     // Token should have 3 parts (header.payload.signature)
     assert_eq!(token.split('.').count(), 3);
@@ -128,7 +128,7 @@ fn test_jwt_secret_initialization() {
     let secret = home_registry::auth::get_or_init_jwt_secret();
 
     // Secret should not be empty
-    assert!(!secret.is_empty());
+    assert_ne!(secret, "");
 
     // Secret should be at least 32 characters for security
     assert!(secret.len() >= 32);

@@ -491,7 +491,7 @@ async fn test_get_inventories_pagination() {
     let inventories = body["data"].as_array().unwrap();
     // Pagination not currently implemented in API - endpoint returns all accessible inventories
     // TODO: Implement pagination support
-    assert!(!inventories.is_empty());
+    assert_ne!(inventories.len(), 0);
 
     // Cleanup
     for id in inv_ids {

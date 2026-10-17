@@ -339,8 +339,8 @@ async fn a_restore_brings_back_every_table_and_resets_the_sequences() {
     let seeded = seed(&scratch.pool).await;
     let db = DatabaseService::new(scratch.pool.clone());
     let before = snapshot(&scratch.pool).await;
-    assert!(!before["user_totp_settings"].is_empty());
-    assert!(!before["item_organizer_values"].is_empty());
+    assert_ne!(before["user_totp_settings"].len(), 0);
+    assert_ne!(before["item_organizer_values"].len(), 0);
 
     let export = db.export_all_data().await.unwrap();
 

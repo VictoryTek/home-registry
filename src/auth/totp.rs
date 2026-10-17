@@ -315,11 +315,11 @@ mod tests {
         let _ = get_or_init_totp_key();
 
         let setup = generate_totp_setup("testuser").expect("Setup should succeed");
-        assert!(!setup.secret_base32.is_empty());
+        assert_ne!(setup.secret_base32, "");
         assert!(setup.otpauth_uri.starts_with("otpauth://totp/"));
         assert!(setup.otpauth_uri.contains("HomeRegistry"));
         assert!(setup.qr_code_data_uri.starts_with("data:image/png;base64,"));
-        assert!(!setup.encrypted_secret.is_empty());
+        assert_ne!(setup.encrypted_secret, "");
     }
 
     #[test]
