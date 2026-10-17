@@ -19,10 +19,9 @@ use crate::models::{
     AdminCreateUserRequest, AdminUpdateUserRequest, ApiResponse, ChangePasswordRequest,
     ConfirmRecoveryCodesRequest, CreateInventoryShareRequest, CreateUserAccessGrantRequest,
     ErrorResponse, InitialSetupRequest, LoginRequest, LoginResponse, LoginTotpRequiredResponse,
-    PermissionSource, RecoveryCodeUsedResponse, RecoveryCodesResponse, RecoveryCodesStatus,
-    SetupStatusResponse, TransferOwnershipRequest, TransferOwnershipResponse,
-    UpdateInventoryShareRequest, UpdateProfileRequest, UpdateUserSettingsRequest,
-    UseRecoveryCodeRequest, UserResponse,
+    RecoveryCodeUsedResponse, RecoveryCodesResponse, RecoveryCodesStatus, SetupStatusResponse,
+    TransferOwnershipRequest, TransferOwnershipResponse, UpdateInventoryShareRequest,
+    UpdateProfileRequest, UpdateUserSettingsRequest, UseRecoveryCodeRequest, UserResponse,
 };
 
 // ==================== Helper Functions ====================
@@ -317,42 +316,46 @@ pub async fn login(pool: web::Data<Pool>, req: web::Json<LoginRequest>) -> Resul
         }));
     }
 
-    // Check if user has TOTP enabled with a mode that requires login verification
-    let totp_settings = db_service.get_totp_settings(user.id).await.ok().flatten();
+    // Check if user has TOTP enabled with a mode that requires login verification.
+    // A failed lookup must not fall through to a full token.
+    let totp_settings = match db_service.get_totp_settings(user.id).await {
+        Ok(settings) => settings,
+        Err(e) => {
+            error!("Error loading TOTP settings during login: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "An internal error occurred".to_string(),
+                message: None,
+            }));
+        },
+    };
 
-    if let Some(ref settings) = totp_settings {
-        if settings.is_enabled && settings.is_verified {
-            let mode: Result<crate::models::TotpMode, _> = settings.totp_mode.parse();
-            if let Ok(mode) = mode {
-                if mode.requires_login_totp() {
-                    // Generate a partial token (5-min, totp_pending=true)
-                    let partial_token = match generate_partial_token(&user) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            error!("Error generating partial token: {}", e);
-                            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                                success: false,
-                                error: "Failed to generate token".to_string(),
-                                message: None,
-                            }));
-                        },
-                    };
+    if totp_settings.is_some_and(|settings| settings.login_requires_totp()) {
+        // Generate a partial token (5-min, totp_pending=true)
+        let partial_token = match generate_partial_token(&user) {
+            Ok(t) => t,
+            Err(e) => {
+                error!("Error generating partial token: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                    success: false,
+                    error: "Failed to generate token".to_string(),
+                    message: None,
+                }));
+            },
+        };
 
-                    info!("User {} requires TOTP verification", user.username);
+        info!("User {} requires TOTP verification", user.username);
 
-                    return Ok(HttpResponse::Ok().json(ApiResponse {
-                        success: true,
-                        data: Some(LoginTotpRequiredResponse {
-                            requires_totp: true,
-                            partial_token,
-                            user: user.into(),
-                        }),
-                        message: Some("TOTP verification required".to_string()),
-                        error: None,
-                    }));
-                }
-            }
-        }
+        return Ok(HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            data: Some(LoginTotpRequiredResponse {
+                requires_totp: true,
+                partial_token,
+                user: user.into(),
+            }),
+            message: Some("TOTP verification required".to_string()),
+            error: None,
+        }));
     }
 
     // Generate token (normal login - no TOTP or recovery_only mode)
@@ -1141,47 +1144,18 @@ pub async fn get_inventory_shares(
     req: HttpRequest,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
-    let auth = match get_auth_context_from_request(&req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
-
     let inventory_id = path.into_inner();
-    let db_service = DatabaseService::new(pool.get_ref().clone());
-
-    // Check if user has permission to view shares (must be owner or have All Access)
-    let effective_perms = match db_service
-        .get_effective_permissions(auth.user_id, inventory_id)
-        .await
+    if let Err(resp) = super::authorize_inventory(
+        pool.get_ref(),
+        &req,
+        inventory_id,
+        super::Perm::ManageSharing,
+    )
+    .await
     {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Error checking permission: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "An internal error occurred".to_string(),
-                message: None,
-            }));
-        },
-    };
-
-    if effective_perms.permission_source == PermissionSource::None {
-        return Ok(HttpResponse::Forbidden().json(ErrorResponse {
-            success: false,
-            error: "Access denied".to_string(),
-            message: Some("You don't have access to this inventory".to_string()),
-        }));
+        return Ok(resp);
     }
-
-    if !effective_perms.can_manage_sharing && !auth.is_admin {
-        return Ok(HttpResponse::Forbidden().json(ErrorResponse {
-            success: false,
-            error: "Insufficient permissions".to_string(),
-            message: Some(
-                "Only inventory owners or users with All Access can manage shares".to_string(),
-            ),
-        }));
-    }
+    let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_inventory_shares(inventory_id).await {
         Ok(shares) => {
@@ -1216,48 +1190,19 @@ pub async fn create_inventory_share(
     path: web::Path<i32>,
     body: web::Json<CreateInventoryShareRequest>,
 ) -> Result<impl Responder> {
-    let auth = match get_auth_context_from_request(&req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
-
     let inventory_id = path.into_inner();
-    let db_service = DatabaseService::new(pool.get_ref().clone());
-
-    // Check if user has permission to share (must be owner or have All Access)
-    let effective_perms = match db_service
-        .get_effective_permissions(auth.user_id, inventory_id)
-        .await
+    let auth = match super::authorize_inventory(
+        pool.get_ref(),
+        &req,
+        inventory_id,
+        super::Perm::ManageSharing,
+    )
+    .await
     {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Error checking permission: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "An internal error occurred".to_string(),
-                message: None,
-            }));
-        },
+        Ok(a) => a,
+        Err(resp) => return Ok(resp),
     };
-
-    if effective_perms.permission_source == PermissionSource::None {
-        return Ok(HttpResponse::Forbidden().json(ErrorResponse {
-            success: false,
-            error: "Access denied".to_string(),
-            message: Some("You don't have access to this inventory".to_string()),
-        }));
-    }
-
-    if !effective_perms.can_manage_sharing && !auth.is_admin {
-        return Ok(HttpResponse::Forbidden().json(ErrorResponse {
-            success: false,
-            error: "Insufficient permissions".to_string(),
-            message: Some(
-                "Only inventory owners or users with All Access can share this inventory"
-                    .to_string(),
-            ),
-        }));
-    }
+    let db_service = DatabaseService::new(pool.get_ref().clone());
 
     // Find the user to share with
     let target_user = match db_service

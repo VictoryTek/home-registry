@@ -923,6 +923,22 @@ pub struct TotpSettings {
     pub last_failed_at: Option<DateTime<Utc>>,
 }
 
+impl TotpSettings {
+    /// Whether login must be completed with a TOTP code.
+    ///
+    /// Fails closed: once TOTP is enabled and verified, only a valid `recovery_only`
+    /// mode lets the password alone through; an unrecognised mode requires TOTP.
+    #[must_use]
+    pub fn login_requires_totp(&self) -> bool {
+        if !(self.is_enabled && self.is_verified) {
+            return false;
+        }
+        self.totp_mode
+            .parse::<TotpMode>()
+            .map_or(true, |mode| mode.requires_login_totp())
+    }
+}
+
 /// Response from TOTP setup (secret + QR code)
 #[derive(Serialize, Debug)]
 pub struct TotpSetupResponse {

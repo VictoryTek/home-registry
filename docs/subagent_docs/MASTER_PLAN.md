@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 2 / 19 high · 0 / 46 medium · 0 / 25 low
+**Progress:** 3 / 19 high · 0 / 46 medium · 0 / 25 low
 
 ---
 
@@ -22,7 +22,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [x] **H-02 — Ownership checks on share update/delete, image delete, and item-images listing**
   Source: BUGS-SEC2. Files: `src/api/auth.rs:1345-1432`, `src/api/mod.rs:1115-1215`.
   A `view` sharee can raise their own share to `edit_inventory`; any user can delete any share or any uploaded file. Require `can_manage_sharing` (or admin) on the share's inventory; require `can_view` for item-images; for image delete, require that the file is referenced by an item the caller can edit.
-- [ ] **H-03 — TOTP must fail closed at login**
+- [x] **H-03 — TOTP must fail closed at login**
   Source: BUGS-SEC3. File: `src/api/auth.rs:321-357`. `get_totp_settings(...).ok().flatten()` and the `if let Ok(mode)` parse both fall through to a full token on error. Return 500 on lookup error and treat an unknown mode as "TOTP required".
 - [ ] **H-04 — Require the current password to regenerate recovery codes**
   Source: BUGS-SEC4. Files: `src/api/auth.rs:1923-1994`, frontend `RecoveryCodesSection`. A stolen JWT currently regenerates codes, resets the password, and locks the owner out.
@@ -75,6 +75,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 
 ### Security hardening
 - [ ] **M-01 — TOTP replay protection and atomic attempt counting** — BUGS-SEC6 (+ the `totp_setup` counter reset). `src/api/totp.rs`, `src/db/mod.rs:3048-3085`.
+  Note: RFC 6238 §5.2 says a verifier MUST NOT accept the same OTP twice. `totp-rs` is pinned at `=5.6.0`, whose `check()` returns a bool (no matched step), so store and compare the last-used step ourselves; do not copy the 6.x `check_current` examples. Also fix `totp_setup`'s "already enabled" check, which skips on a DB error (`src/api/totp.rs:60`).
 - [ ] **M-02 — Changing/downgrading TOTP mode requires re-authentication** — BUGS-SEC7. `src/api/totp.rs:524-580`.
 - [ ] **M-03 — CSV formula injection** — BUGS-SEC9. `src/api/mod.rs:1231-1289`; prefix `= + - @ \t \r` cells.
 - [ ] **M-04 — Account enumeration and login timing** — BUGS-SEC10. Dummy-hash verify for unknown users; check `is_active` after the password.

@@ -326,3 +326,48 @@ fn test_item_model_with_optional_fields() {
     };
     assert!(complete.validate().is_ok());
 }
+
+// ==================== TOTP login requirement ====================
+
+fn totp_settings(
+    mode: &str,
+    is_enabled: bool,
+    is_verified: bool,
+) -> home_registry::models::TotpSettings {
+    home_registry::models::TotpSettings {
+        id: uuid::Uuid::new_v4(),
+        user_id: uuid::Uuid::new_v4(),
+        totp_secret_encrypted: String::new(),
+        totp_mode: mode.to_string(),
+        is_enabled,
+        is_verified,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        last_used_at: None,
+        failed_attempts: 0,
+        last_failed_at: None,
+    }
+}
+
+#[test]
+fn test_login_requires_totp_only_when_enabled_and_verified() {
+    assert!(!totp_settings("both", false, false).login_requires_totp());
+    assert!(!totp_settings("both", true, false).login_requires_totp());
+    assert!(!totp_settings("both", false, true).login_requires_totp());
+    assert!(totp_settings("both", true, true).login_requires_totp());
+}
+
+#[test]
+fn test_login_requires_totp_by_mode() {
+    assert!(totp_settings("2fa_only", true, true).login_requires_totp());
+    assert!(totp_settings("both", true, true).login_requires_totp());
+    assert!(!totp_settings("recovery_only", true, true).login_requires_totp());
+}
+
+#[test]
+fn test_login_requires_totp_fails_closed_on_unknown_mode() {
+    assert!(totp_settings("not_a_mode", true, true).login_requires_totp());
+    assert!(totp_settings("", true, true).login_requires_totp());
+    // An unknown mode on a non-enabled record still does not demand TOTP
+    assert!(!totp_settings("not_a_mode", false, false).login_requires_totp());
+}

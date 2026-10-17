@@ -1096,6 +1096,7 @@ async fn test_share_and_image_endpoints_enforce_ownership() {
             web::scope("/api")
                 .service(api::auth::update_inventory_share)
                 .service(api::auth::delete_inventory_share)
+                .service(api::auth::get_inventory_shares)
                 .service(api::delete_image)
                 .service(api::get_inventory_item_images),
         ),
@@ -1205,6 +1206,24 @@ async fn test_share_and_image_endpoints_enforce_ownership() {
         StatusCode::NOT_FOUND
     );
 
+    // Listing/creating shares: a stranger gets 404, a view sharee gets 403
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/inventories/{inventory_id}/shares"))
+        .insert_header(bearer(&stranger_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/inventories/{inventory_id}/shares"))
+        .insert_header(bearer(&viewer_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
     // Image / item-images: stranger gets 404, a view-only sharee cannot delete the image
     let req = test::TestRequest::get()
         .uri(&format!("/api/inventories/{inventory_id}/item-images"))
@@ -1260,6 +1279,63 @@ async fn test_share_and_image_endpoints_enforce_ownership() {
         &other_viewer_name,
         &stranger_name,
     ] {
+        common::delete_test_user(&pool, name).await.ok();
+    }
+}
+
+#[actix_web::test]
+async fn test_login_requires_totp_code_when_enabled() {
+    let pool = common::create_test_pool();
+    home_registry::auth::get_or_init_jwt_secret();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .service(web::scope("/api").service(api::auth::login)),
+    )
+    .await;
+
+    let two_fa_name = common::test_username("totp_2fa");
+    let recovery_name = common::test_username("totp_rec");
+    for name in [&two_fa_name, &recovery_name] {
+        common::create_test_user(&pool, name).await;
+    }
+
+    let db = home_registry::db::DatabaseService::new(pool.clone());
+    for (name, mode) in [
+        (&two_fa_name, "2fa_only"),
+        (&recovery_name, "recovery_only"),
+    ] {
+        let user = db.get_user_by_username(name).await.unwrap().unwrap();
+        db.create_totp_settings(user.id, "encrypted-secret")
+            .await
+            .unwrap();
+        db.enable_totp(user.id, mode).await.unwrap();
+    }
+
+    let login = |name: &str| {
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({ "username": name, "password": common::test_password() }))
+            .to_request()
+    };
+
+    // 2fa_only: password alone yields a partial token, never a full session token
+    let resp = test::call_service(&app, login(&two_fa_name)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["data"]["requires_totp"], true);
+    assert!(body["data"]["partial_token"].is_string());
+    assert!(body["data"]["token"].is_null());
+
+    // recovery_only: TOTP is not required at login
+    let resp = test::call_service(&app, login(&recovery_name)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body["data"]["token"].is_string());
+    assert!(body["data"]["requires_totp"].is_null());
+
+    for name in [&two_fa_name, &recovery_name] {
         common::delete_test_user(&pool, name).await.ok();
     }
 }
