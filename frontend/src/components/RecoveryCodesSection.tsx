@@ -15,6 +15,8 @@ export function RecoveryCodesSection({ onCodesGenerated }: RecoveryCodesSectionP
   const [generating, setGenerating] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [password, setPassword] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const codesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -35,31 +37,38 @@ export function RecoveryCodesSection({ onCodesGenerated }: RecoveryCodesSectionP
     }
   };
 
-  const handleGenerate = async () => {
-    // Show confirmation if user already has codes
-    if (status?.has_codes) {
-      setShowConfirmDialog(true);
-      return;
-    }
-    await generateCodes();
+  const closeDialog = () => {
+    setShowConfirmDialog(false);
+    setPassword('');
+    setPasswordError(null);
+  };
+
+  // Always ask for the current password: recovery codes can reset the account password
+  const handleGenerate = () => {
+    setShowConfirmDialog(true);
   };
 
   const generateCodes = async () => {
+    if (!password) {
+      setPasswordError('Enter your current password');
+      return;
+    }
     setGenerating(true);
-    setShowConfirmDialog(false);
+    setPasswordError(null);
     try {
-      const result = await authApi.generateRecoveryCodes();
+      const result = await authApi.generateRecoveryCodes(password);
       if (result.success && result.data) {
+        closeDialog();
         setCodes(result.data.codes);
         showToast('Recovery codes generated! Save them now.', 'success');
         // Reload status (codes are unconfirmed)
         void loadStatus();
         onCodesGenerated?.();
       } else {
-        showToast(result.error ?? 'Failed to generate recovery codes', 'error');
+        setPasswordError(result.error ?? 'Failed to generate recovery codes');
       }
     } catch {
-      showToast('Failed to generate recovery codes', 'error');
+      setPasswordError('Failed to generate recovery codes');
     } finally {
       setGenerating(false);
     }
@@ -260,26 +269,57 @@ export function RecoveryCodesSection({ onCodesGenerated }: RecoveryCodesSectionP
 
       {/* Confirmation dialog for regenerating */}
       {showConfirmDialog && (
-        <div className="modal-overlay" onClick={() => setShowConfirmDialog(false)}>
+        <div className="modal-overlay" onClick={closeDialog}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
             <div className="modal-header">
-              <h3>Regenerate Recovery Codes?</h3>
-              <button className="modal-close" onClick={() => setShowConfirmDialog(false)}>
+              <h3>
+                {status?.has_codes ? 'Regenerate Recovery Codes?' : 'Generate Recovery Codes'}
+              </h3>
+              <button className="modal-close" onClick={closeDialog}>
                 <i className="fas fa-times"></i>
               </button>
             </div>
             <div className="modal-body">
-              <p>
-                <strong>Warning:</strong> This will invalidate all your existing recovery codes.
-                Make sure you no longer need your old codes before proceeding.
-              </p>
+              {status?.has_codes && (
+                <p>
+                  <strong>Warning:</strong> This will invalidate all your existing recovery codes.
+                  Make sure you no longer need your old codes before proceeding.
+                </p>
+              )}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void generateCodes();
+                }}
+              >
+                <div className={`form-group ${passwordError ? 'has-error' : ''}`}>
+                  <label htmlFor="recoveryCodesPassword">Current Password</label>
+                  <input
+                    type="password"
+                    id="recoveryCodesPassword"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setPasswordError(null);
+                    }}
+                    placeholder="Enter your current password"
+                    autoComplete="current-password"
+                    disabled={generating}
+                  />
+                  {passwordError && <span className="form-error">{passwordError}</span>}
+                </div>
+              </form>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-secondary" onClick={() => setShowConfirmDialog(false)}>
+              <button className="btn btn-secondary" onClick={closeDialog}>
                 Cancel
               </button>
-              <button className="btn btn-danger" onClick={generateCodes} disabled={generating}>
-                {generating ? 'Generating...' : 'Regenerate'}
+              <button
+                className={status?.has_codes ? 'btn btn-danger' : 'btn btn-primary'}
+                onClick={() => void generateCodes()}
+                disabled={generating}
+              >
+                {generating ? 'Generating...' : status?.has_codes ? 'Regenerate' : 'Generate'}
               </button>
             </div>
           </div>

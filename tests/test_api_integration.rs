@@ -1339,3 +1339,79 @@ async fn test_login_requires_totp_code_when_enabled() {
         common::delete_test_user(&pool, name).await.ok();
     }
 }
+
+#[actix_web::test]
+async fn test_generate_recovery_codes_requires_current_password() {
+    let pool = common::create_test_pool();
+    home_registry::auth::get_or_init_jwt_secret();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .service(web::scope("/api").service(api::auth::generate_recovery_codes)),
+    )
+    .await;
+
+    let username = common::test_username("rc_regen");
+    common::create_test_user(&pool, &username).await;
+    let db = home_registry::db::DatabaseService::new(pool.clone());
+    let user = db.get_user_by_username(&username).await.unwrap().unwrap();
+    let token = common::get_test_token(&pool, &username).await;
+
+    // Existing codes the attacker must not be able to replace
+    db.store_recovery_codes(user.id, vec!["hash-a".to_string(), "hash-b".to_string()])
+        .await
+        .unwrap();
+    let unused_before = db.get_recovery_codes_status(user.id).await.unwrap().2;
+    assert_eq!(unused_before, 2);
+
+    // No token
+    let req = test::TestRequest::post()
+        .uri("/api/auth/recovery-codes/generate")
+        .set_json(json!({ "current_password": common::test_password() }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Valid token but wrong password: 400 (not 401), codes untouched
+    let req = test::TestRequest::post()
+        .uri("/api/auth/recovery-codes/generate")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "current_password": "WrongPassword123!" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // Missing password field
+    let req = test::TestRequest::post()
+        .uri("/api/auth/recovery-codes/generate")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({}))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        db.get_recovery_codes_status(user.id).await.unwrap().2,
+        unused_before
+    );
+
+    // Correct password: new codes are issued and replace the old ones
+    let req = test::TestRequest::post()
+        .uri("/api/auth/recovery-codes/generate")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "current_password": common::test_password() }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["data"]["codes"].as_array().unwrap().len(), 10);
+    assert_eq!(db.get_recovery_codes_status(user.id).await.unwrap().2, 10);
+
+    common::delete_test_user(&pool, &username).await.ok();
+}

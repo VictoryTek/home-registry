@@ -816,6 +816,12 @@ pub struct RecoveryCodesResponse {
     pub message: String,
 }
 
+/// Request to generate new recovery codes (re-authenticates with the current password)
+#[derive(Deserialize, Debug)]
+pub struct GenerateRecoveryCodesRequest {
+    pub current_password: String,
+}
+
 /// Request to confirm recovery codes have been saved
 #[derive(Deserialize, Debug)]
 pub struct ConfirmRecoveryCodesRequest {

@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 3 / 19 high · 0 / 46 medium · 0 / 25 low
+**Progress:** 4 / 19 high · 0 / 46 medium · 0 / 25 low
 
 ---
 
@@ -24,10 +24,11 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
   A `view` sharee can raise their own share to `edit_inventory`; any user can delete any share or any uploaded file. Require `can_manage_sharing` (or admin) on the share's inventory; require `can_view` for item-images; for image delete, require that the file is referenced by an item the caller can edit.
 - [x] **H-03 — TOTP must fail closed at login**
   Source: BUGS-SEC3. File: `src/api/auth.rs:321-357`. `get_totp_settings(...).ok().flatten()` and the `if let Ok(mode)` parse both fall through to a full token on error. Return 500 on lookup error and treat an unknown mode as "TOTP required".
-- [ ] **H-04 — Require the current password to regenerate recovery codes**
+- [x] **H-04 — Require the current password to regenerate recovery codes**
   Source: BUGS-SEC4. Files: `src/api/auth.rs:1923-1994`, frontend `RecoveryCodesSection`. A stolen JWT currently regenerates codes, resets the password, and locks the owner out.
 - [ ] **H-05 — Rate limiter fix + bound unauthenticated Argon2 work**
   Sources: ARCH-A4, BUGS-SEC5, BUGS-SEC14 (rate-limit part). Files: `src/main.rs:130-170`, `src/api/auth.rs:2174-2185`.
+  Also cover password-verifying authenticated endpoints (`PUT /auth/password`, `POST /auth/recovery-codes/generate`): a stolen token can otherwise guess the password there.
   Build the limiter backend once (not per worker), correct `interval/max_requests` (currently ~5,000 req/s), guard `RATE_LIMIT_RPS=0`, key on real client IP behind a trusted proxy, and add per-account/per-IP attempt limits on login/register/recovery. Replace "verify against 10 hashes" for recovery codes with a single lookup.
 - [ ] **H-06 — Token versioning, auth context from the DB user, and "sign out everywhere"**
   Sources: ARCH-A5, BUGS-SEC8, FEAT-G1. Files: `src/auth/mod.rs:143-217, 280-288`, `src/api/auth.rs:63-102`, new migration (`users.token_version`).

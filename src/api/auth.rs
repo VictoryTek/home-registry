@@ -18,10 +18,11 @@ use crate::db::DatabaseService;
 use crate::models::{
     AdminCreateUserRequest, AdminUpdateUserRequest, ApiResponse, ChangePasswordRequest,
     ConfirmRecoveryCodesRequest, CreateInventoryShareRequest, CreateUserAccessGrantRequest,
-    ErrorResponse, InitialSetupRequest, LoginRequest, LoginResponse, LoginTotpRequiredResponse,
-    RecoveryCodeUsedResponse, RecoveryCodesResponse, RecoveryCodesStatus, SetupStatusResponse,
-    TransferOwnershipRequest, TransferOwnershipResponse, UpdateInventoryShareRequest,
-    UpdateProfileRequest, UpdateUserSettingsRequest, UseRecoveryCodeRequest, UserResponse,
+    ErrorResponse, GenerateRecoveryCodesRequest, InitialSetupRequest, LoginRequest, LoginResponse,
+    LoginTotpRequiredResponse, RecoveryCodeUsedResponse, RecoveryCodesResponse,
+    RecoveryCodesStatus, SetupStatusResponse, TransferOwnershipRequest, TransferOwnershipResponse,
+    UpdateInventoryShareRequest, UpdateProfileRequest, UpdateUserSettingsRequest,
+    UseRecoveryCodeRequest, UserResponse,
 };
 
 // ==================== Helper Functions ====================
@@ -1908,11 +1909,13 @@ pub async fn transfer_inventory_ownership(
 // ==================== Recovery Codes Endpoints ====================
 
 /// Generate 10 new recovery codes for the authenticated user
-/// Any existing codes are replaced
+/// Any existing codes are replaced. Requires the current password, because recovery
+/// codes can reset the password and a stolen session token must not be enough.
 #[post("/auth/recovery-codes/generate")]
 pub async fn generate_recovery_codes(
     req: HttpRequest,
     pool: web::Data<Pool>,
+    body: web::Json<GenerateRecoveryCodesRequest>,
 ) -> Result<impl Responder> {
     let auth = match get_auth_context_from_request(&req, pool.get_ref()).await {
         Ok(a) => a,
@@ -1920,6 +1923,46 @@ pub async fn generate_recovery_codes(
     };
 
     let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    // Re-authenticate before touching any existing codes
+    let user = match db_service.get_user_by_id(auth.user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return Ok(HttpResponse::NotFound().json(ErrorResponse {
+                success: false,
+                error: "User not found".to_string(),
+                message: None,
+            }));
+        },
+        Err(e) => {
+            error!("Error getting user for recovery code generation: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "An internal error occurred".to_string(),
+                message: None,
+            }));
+        },
+    };
+
+    match verify_password(body.current_password.clone(), user.password_hash).await {
+        Ok(true) => {},
+        Ok(false) => {
+            // 400, not 401: the frontend treats any 401 as an expired session
+            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+                success: false,
+                error: "Current password is incorrect".to_string(),
+                message: None,
+            }));
+        },
+        Err(e) => {
+            error!("Error verifying password: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "An internal error occurred".to_string(),
+                message: None,
+            }));
+        },
+    }
 
     // Generate 10 random recovery codes
     let mut rng = rand::thread_rng();

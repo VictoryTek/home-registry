@@ -786,11 +786,14 @@ export const authApi = {
 
   // ==================== Recovery Codes ====================
 
-  // Generate new recovery codes (replaces any existing codes)
-  async generateRecoveryCodes(): Promise<ApiResponse<RecoveryCodesResponse>> {
+  // Generate new recovery codes (replaces any existing codes); requires the current password
+  async generateRecoveryCodes(
+    currentPassword: string
+  ): Promise<ApiResponse<RecoveryCodesResponse>> {
     const response = await fetchWithRetry(`${API_BASE}/auth/recovery-codes/generate`, {
       method: 'POST',
       headers: getHeaders(),
+      body: JSON.stringify({ current_password: currentPassword }),
     });
     return handleResponse<RecoveryCodesResponse>(response);
   },

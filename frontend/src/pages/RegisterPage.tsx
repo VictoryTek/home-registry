@@ -80,7 +80,7 @@ export function RegisterPage() {
         localStorage.setItem('home_registry_user', JSON.stringify(result.data.user));
 
         // Generate recovery codes
-        const codesResponse = await authApi.generateRecoveryCodes();
+        const codesResponse = await authApi.generateRecoveryCodes(formData.password);
         if (codesResponse.success && codesResponse.data) {
           setRecoveryCodes(codesResponse.data.codes);
           setShowRecoveryCodes(true);
