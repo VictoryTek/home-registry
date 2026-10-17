@@ -759,6 +759,73 @@ pub struct EffectivePermissions {
     pub permission_source: PermissionSource,
 }
 
+impl EffectivePermissions {
+    /// No access at all.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            can_view: false,
+            can_edit_items: false,
+            can_add_items: false,
+            can_remove_items: false,
+            can_edit_inventory: false,
+            can_delete_inventory: false,
+            can_manage_sharing: false,
+            can_manage_organizers: false,
+            is_owner: false,
+            has_all_access: false,
+            permission_source: PermissionSource::None,
+        }
+    }
+
+    /// Full control, as held by an owner or an All Access grantee.
+    fn full(source: PermissionSource) -> Self {
+        Self {
+            can_view: true,
+            can_edit_items: true,
+            can_add_items: true,
+            can_remove_items: true,
+            can_edit_inventory: true,
+            can_delete_inventory: true,
+            can_manage_sharing: true,
+            can_manage_organizers: true,
+            is_owner: source == PermissionSource::Owner,
+            has_all_access: source == PermissionSource::AllAccess,
+            permission_source: source,
+        }
+    }
+
+    /// Build the permissions for one `inventory_access` row (`source` and `permission_level`
+    /// as the view reports them).
+    ///
+    /// Fails closed: an unknown source, or a share without a known level, returns `None`
+    /// and callers must treat that as no access.
+    #[must_use]
+    pub fn from_access(source: &str, permission_level: Option<&str>) -> Option<Self> {
+        match source {
+            "owner" => Some(Self::full(PermissionSource::Owner)),
+            "all_access" => Some(Self::full(PermissionSource::AllAccess)),
+            "share" => {
+                let level: PermissionLevel = permission_level?.parse().ok()?;
+                Some(Self {
+                    can_view: level.can_view(),
+                    can_edit_items: level.can_edit_items(),
+                    can_add_items: level.can_add_items(),
+                    can_remove_items: level.can_remove_items(),
+                    can_edit_inventory: level.can_edit_inventory(),
+                    can_delete_inventory: false, // Only owner or All Access can delete
+                    can_manage_sharing: false,   // Only owner or All Access can manage sharing
+                    can_manage_organizers: level.can_manage_organizers(),
+                    is_owner: false,
+                    has_all_access: false,
+                    permission_source: PermissionSource::InventoryShare,
+                })
+            },
+            _ => None,
+        }
+    }
+}
+
 /// Where the user's permissions come from
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

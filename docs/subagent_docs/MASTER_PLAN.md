@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 6 / 19 high · 0 / 47 medium · 0 / 27 low
+**Progress:** 7 / 19 high · 0 / 48 medium · 0 / 27 low
 
 ---
 
@@ -35,8 +35,9 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
   Sources: ARCH-A5, BUGS-SEC8, FEAT-G1. Files: `src/auth/mod.rs:143-217, 280-288`, `src/api/auth.rs:63-102`, new migration (`users.token_version`).
   Build `AuthContext.is_admin` from the loaded row (demoted admins lose access immediately), invalidate tokens on password change/reset/recovery/deactivation, add the Settings button.
   Done: `users.token_version` (migration V024), `tv` claim, auth context from the stored user, `POST /auth/logout-all` ("Sign out all other devices"), fresh token after password change / TOTP enable / disable. The per-user version counter is standard practice, not a verified OWASP source (the OWASP JWT cheat sheet could not be retrieved). Plain logout remains client-side only; see **L-27**.
-- [ ] **H-07 — One source of truth for "who can access this inventory"**
+- [x] **H-07 — One source of truth for "who can access this inventory"**
   Source: ARCH-A2. Files: `src/db/mod.rs:1765-1869, 1919-1961, 2362-2384, 2397-2500`. Four copies of the owner/share/grant rule; `get_effective_permissions` falls back to `View` on a parse error (fails open). Consolidate in SQL (view/function) and have the Rust permission object derive from it.
+  Done: view `inventory_access` (migration V025) is the single definition; `get_effective_permissions`, `get_accessible_inventories`, `check_inventory_access` and the four report queries read it; unknown share levels are not emitted by the view and `EffectivePermissions::from_access` also denies them. Plans checked on 300k seeded items: the user-id filter is pushed into every branch and uses indexes (0.13 ms / 0.16 ms / 1.9 ms), so no SQL function was needed. Intentional exceptions that do not decide access: share and grant CRUD by id, the ownership-transfer cleanup, backup/restore (admin, whole tables), and the owner-only check in `transfer_inventory_ownership` (compares `inventories.user_id` directly because it is owner-only by design). Any change to who may access an inventory belongs in the view; see **M-48**.
 
 ### Data integrity
 
@@ -88,6 +89,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [ ] **M-07 — Cookie-auth fallback and localhost CORS: finish or remove** — ARCH-H3. `src/auth/mod.rs:219-237`, `src/main.rs:170-188`.
 - [ ] **M-08 — Reduce XSS blast radius: CSP without `unsafe-inline/unsafe-eval`, token handling** — BUGS-SEC13 (self-hosting fonts/icons from ARCH-D6 is the enabler).
 - [ ] **M-47 — Single-lookup recovery code verification** — split out of H-05. `POST /auth/recovery-codes/use` still verifies against all of a user's (up to 10) Argon2 hashes per attempt (H-05 pads to exactly 10 so timing is constant, and the throttle plus Argon2 concurrency cap bound the cost). A single lookup needs a new indexed lookup column (e.g. an HMAC of the code). Existing codes are stored only as Argon2 hashes and cannot be backfilled, so this needs the column plus a fallback scan for old rows, or forced regeneration. `src/api/auth.rs`, `src/db/mod.rs`, new migration.
+- [ ] **M-48 — Decide how inventories of deactivated users are treated** — Today sharees and All Access grantees keep access to inventories owned (or granted) by a deactivated user, because the access rule never looks at the owner's or grantor's `is_active`. Options: keep access (current), read-only, or no access. The `inventory_access` view (V025) is now the single place to implement the choice (join `users` in the owner and all_access branches, or filter by `is_active`). A deactivated *grantee* is already refused at authentication.
 
 ### Correctness
 - [ ] **M-09 — Recovery codes: atomic one-time use and atomic regeneration** — BUGS-BUG10. `UPDATE ... WHERE is_used = false`, transaction around delete/insert/update.

@@ -371,3 +371,63 @@ fn test_login_requires_totp_fails_closed_on_unknown_mode() {
     // An unknown mode on a non-enabled record still does not demand TOTP
     assert!(!totp_settings("not_a_mode", false, false).login_requires_totp());
 }
+
+// ==================== Effective permissions from an inventory_access row ====================
+
+mod effective_permissions {
+    use home_registry::models::{EffectivePermissions, PermissionSource};
+
+    #[test]
+    fn owner_and_all_access_have_full_control() {
+        for (source, expect) in [
+            ("owner", PermissionSource::Owner),
+            ("all_access", PermissionSource::AllAccess),
+        ] {
+            let p = EffectivePermissions::from_access(source, None).expect(source);
+            assert!(p.can_view && p.can_edit_items && p.can_add_items && p.can_remove_items);
+            assert!(p.can_edit_inventory && p.can_delete_inventory);
+            assert!(p.can_manage_sharing && p.can_manage_organizers);
+            assert_eq!(p.permission_source, expect);
+            assert_eq!(p.is_owner, source == "owner");
+            assert_eq!(p.has_all_access, source == "all_access");
+        }
+    }
+
+    #[test]
+    fn share_levels_map_to_exactly_their_capabilities() {
+        let view = EffectivePermissions::from_access("share", Some("view")).unwrap();
+        assert!(view.can_view);
+        assert!(!view.can_edit_items && !view.can_add_items && !view.can_remove_items);
+        assert!(!view.can_edit_inventory && !view.can_manage_organizers);
+
+        let edit_items = EffectivePermissions::from_access("share", Some("edit_items")).unwrap();
+        assert!(edit_items.can_view && edit_items.can_edit_items);
+        assert!(!edit_items.can_add_items && !edit_items.can_remove_items);
+        assert!(!edit_items.can_edit_inventory && !edit_items.can_manage_organizers);
+
+        let manager = EffectivePermissions::from_access("share", Some("edit_inventory")).unwrap();
+        assert!(manager.can_view && manager.can_edit_items && manager.can_add_items);
+        assert!(manager.can_remove_items && manager.can_edit_inventory);
+        assert!(manager.can_manage_organizers);
+
+        // A share never confers deleting the inventory or managing its sharing
+        for level in ["view", "edit_items", "edit_inventory"] {
+            let p = EffectivePermissions::from_access("share", Some(level)).unwrap();
+            assert!(!p.can_delete_inventory && !p.can_manage_sharing, "{level}");
+            assert_eq!(p.permission_source, PermissionSource::InventoryShare);
+        }
+    }
+
+    #[test]
+    fn unknown_input_fails_closed() {
+        assert!(EffectivePermissions::from_access("share", Some("superuser")).is_none());
+        assert!(EffectivePermissions::from_access("share", Some("")).is_none());
+        assert!(EffectivePermissions::from_access("share", None).is_none());
+        assert!(EffectivePermissions::from_access("admin", None).is_none());
+        assert!(EffectivePermissions::from_access("", Some("view")).is_none());
+
+        let none = EffectivePermissions::none();
+        assert!(!none.can_view && !none.can_edit_items && !none.can_delete_inventory);
+        assert_eq!(none.permission_source, PermissionSource::None);
+    }
+}

@@ -17,7 +17,6 @@ use crate::models::{
     OrganizerType,
     OrganizerTypeWithOptions,
     PermissionLevel,
-    PermissionSource,
     SetItemOrganizerValueRequest,
     // TOTP models
     TotpSettings,
@@ -1892,7 +1891,12 @@ impl DatabaseService {
         Ok(shares)
     }
 
-    /// Get comprehensive effective permissions for a user on an inventory
+    /// Get comprehensive effective permissions for a user on an inventory.
+    ///
+    /// Who has access comes only from the `inventory_access` view (migration V025), the single
+    /// definition of inventory access. This reads the user's best row (owner, then All Access,
+    /// then the strongest share) and maps it with [`EffectivePermissions::from_access`].
+    /// Anything unexpected means no access.
     pub async fn get_effective_permissions(
         &self,
         user_id: Uuid,
@@ -1900,102 +1904,35 @@ impl DatabaseService {
     ) -> Result<EffectivePermissions, Box<dyn std::error::Error>> {
         let client = self.pool.get().await?;
 
-        // Check if user is the owner
-        let owner_rows = client
+        let rows = client
             .query(
-                "SELECT user_id FROM inventories WHERE id = $1",
-                &[&inventory_id],
-            )
-            .await?;
-
-        if let Some(row) = owner_rows.first() {
-            let owner_id: Option<Uuid> = row.get(0);
-            if owner_id == Some(user_id) {
-                return Ok(EffectivePermissions {
-                    can_view: true,
-                    can_edit_items: true,
-                    can_add_items: true,
-                    can_remove_items: true,
-                    can_edit_inventory: true,
-                    can_delete_inventory: true,
-                    can_manage_sharing: true,
-                    can_manage_organizers: true,
-                    is_owner: true,
-                    has_all_access: false,
-                    permission_source: PermissionSource::Owner,
-                });
-            }
-
-            // Check for All Access grant from the owner
-            if let Some(owner_uuid) = owner_id {
-                let all_access_rows = client
-                    .query(
-                        "SELECT id FROM user_access_grants 
-                         WHERE grantor_user_id = $1 AND grantee_user_id = $2",
-                        &[&owner_uuid, &user_id],
-                    )
-                    .await?;
-
-                if !all_access_rows.is_empty() {
-                    return Ok(EffectivePermissions {
-                        can_view: true,
-                        can_edit_items: true,
-                        can_add_items: true,
-                        can_remove_items: true,
-                        can_edit_inventory: true,
-                        can_delete_inventory: true,
-                        can_manage_sharing: true,
-                        can_manage_organizers: true,
-                        is_owner: false,
-                        has_all_access: true,
-                        permission_source: PermissionSource::AllAccess,
-                    });
-                }
-            }
-        }
-
-        // Check for per-inventory share
-        let share_rows = client
-            .query(
-                "SELECT permission_level FROM inventory_shares 
-                 WHERE inventory_id = $1 AND shared_with_user_id = $2",
+                "SELECT source, permission_level FROM inventory_access
+                 WHERE inventory_id = $1 AND user_id = $2
+                 ORDER BY precedence,
+                          CASE permission_level
+                              WHEN 'edit_inventory' THEN 0
+                              WHEN 'edit_items' THEN 1
+                              ELSE 2
+                          END
+                 LIMIT 1",
                 &[&inventory_id, &user_id],
             )
             .await?;
 
-        if let Some(row) = share_rows.first() {
-            let perm_str: String = row.get(0);
-            let permission = perm_str.parse().unwrap_or(PermissionLevel::View);
-
-            return Ok(EffectivePermissions {
-                can_view: permission.can_view(),
-                can_edit_items: permission.can_edit_items(),
-                can_add_items: permission.can_add_items(),
-                can_remove_items: permission.can_remove_items(),
-                can_edit_inventory: permission.can_edit_inventory(),
-                can_delete_inventory: false, // Only owner or AllAccess can delete
-                can_manage_sharing: false,   // Only owner or AllAccess can manage sharing
-                can_manage_organizers: permission.can_manage_organizers(),
-                is_owner: false,
-                has_all_access: false,
-                permission_source: PermissionSource::InventoryShare,
-            });
+        let Some(row) = rows.first() else {
+            return Ok(EffectivePermissions::none());
+        };
+        let source: String = row.get(0);
+        let level: Option<String> = row.get(1);
+        if let Some(permissions) = EffectivePermissions::from_access(&source, level.as_deref()) {
+            Ok(permissions)
+        } else {
+            error!(
+                "Unrecognised inventory access row denied: user_id={user_id} \
+                 inventory_id={inventory_id} source={source} level={level:?}"
+            );
+            Ok(EffectivePermissions::none())
         }
-
-        // No access
-        Ok(EffectivePermissions {
-            can_view: false,
-            can_edit_items: false,
-            can_add_items: false,
-            can_remove_items: false,
-            can_edit_inventory: false,
-            can_delete_inventory: false,
-            can_manage_sharing: false,
-            can_manage_organizers: false,
-            is_owner: false,
-            has_all_access: false,
-            permission_source: PermissionSource::None,
-        })
     }
 
     /// Update inventory share permission
@@ -2085,26 +2022,20 @@ impl DatabaseService {
         Ok(rows_affected > 0)
     }
 
-    /// Get inventories accessible to a user (owned, shared via `inventory_shares`, or via All Access grants)
+    /// Get inventories accessible to a user (owned, shared, or via an All Access grant), as
+    /// defined by the `inventory_access` view.
     pub async fn get_accessible_inventories(
         &self,
         user_id: Uuid,
     ) -> Result<Vec<Inventory>, Box<dyn std::error::Error>> {
         let client = self.pool.get().await?;
 
-        // Query includes:
-        // 1. Inventories owned by the user (i.user_id = $1)
-        // 2. Inventories shared directly with the user (inventory_shares)
-        // 3. Inventories owned by users who granted All Access to this user (user_access_grants)
+        // IN, not a join: a user can have several access rows for one inventory
         let rows = client
             .query(
-                "SELECT DISTINCT i.id, i.name, i.description, i.location, i.image_url, i.user_id, i.created_at, i.updated_at 
+                "SELECT i.id, i.name, i.description, i.location, i.image_url, i.user_id, i.created_at, i.updated_at
                  FROM inventories i
-                 LEFT JOIN inventory_shares s ON i.id = s.inventory_id AND s.shared_with_user_id = $1
-                 LEFT JOIN user_access_grants g ON i.user_id = g.grantor_user_id AND g.grantee_user_id = $1
-                 WHERE i.user_id = $1 
-                    OR s.shared_with_user_id = $1
-                    OR g.grantee_user_id = $1
+                 WHERE i.id IN (SELECT inventory_id FROM inventory_access WHERE user_id = $1)
                  ORDER BY i.name ASC",
                 &[&user_id],
             )
@@ -2528,7 +2459,9 @@ impl DatabaseService {
 
     // ==================== Inventory Reporting Operations ====================
 
-    /// Check if user has access to a specific inventory
+    /// Check if user has access to a specific inventory (any way of reaching it, per the
+    /// `inventory_access` view). This only answers "can see"; writes must check the capability
+    /// flags from [`Self::get_effective_permissions`].
     pub async fn check_inventory_access(
         &self,
         user_id: Uuid,
@@ -2538,18 +2471,14 @@ impl DatabaseService {
 
         let row = client
             .query_one(
-                "SELECT COUNT(*)::int8 as count FROM inventories 
-                 WHERE id = $1 AND (
-                     user_id = $2
-                     OR id IN (SELECT inventory_id FROM inventory_shares WHERE shared_with_user_id = $2)
-                     OR user_id IN (SELECT grantor_user_id FROM user_access_grants WHERE grantee_user_id = $2)
+                "SELECT EXISTS (
+                     SELECT 1 FROM inventory_access WHERE inventory_id = $1 AND user_id = $2
                  )",
                 &[&inventory_id, &user_id],
             )
             .await?;
 
-        let count: i64 = row.get(0);
-        Ok(count > 0)
+        Ok(row.get(0))
     }
 
     /// Retrieves filtered inventory items for report generation.
@@ -2572,14 +2501,10 @@ impl DatabaseService {
         let client = self.pool.get().await?;
 
         // Build dynamic WHERE clause based on filters
-        let mut conditions = vec![
-            "i.inventory_id IN (
-                SELECT id FROM inventories 
-                WHERE user_id = $1
-                   OR id IN (SELECT inventory_id FROM inventory_shares WHERE shared_with_user_id = $1)
-                   OR user_id IN (SELECT grantor_user_id FROM user_access_grants WHERE grantee_user_id = $1)
-            )".to_string()
-        ];
+        let mut conditions = vec!["i.inventory_id IN (
+                SELECT inventory_id FROM inventory_access WHERE user_id = $1
+            )"
+        .to_string()];
         let mut param_index = 2;
 
         // Build parameters vector
@@ -2717,7 +2642,7 @@ impl DatabaseService {
                 )
             } else {
                 (
-                "SELECT 
+                    "SELECT 
                     COUNT(*)::int8 as total_items,
                     COALESCE(SUM(purchase_price::float8 * quantity), 0.0)::float8 as total_value,
                     COALESCE(SUM(quantity), 0)::int8 as total_quantity,
@@ -2728,13 +2653,10 @@ impl DatabaseService {
                     COALESCE(AVG(purchase_price::float8), 0.0)::float8 as average_item_value
                  FROM items
                  WHERE inventory_id IN (
-                     SELECT id FROM inventories 
-                     WHERE user_id = $1
-                        OR id IN (SELECT inventory_id FROM inventory_shares WHERE shared_with_user_id = $1)
-                        OR user_id IN (SELECT grantor_user_id FROM user_access_grants WHERE grantee_user_id = $1)
+                     SELECT inventory_id FROM inventory_access WHERE user_id = $1
                  )",
-                vec![Box::new(user_id)],
-            )
+                    vec![Box::new(user_id)],
+                )
             };
 
         let params_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -2808,10 +2730,7 @@ impl DatabaseService {
                      SELECT COALESCE(SUM(purchase_price::float8 * quantity), 0.0)::float8 as grand_total
                      FROM items
                      WHERE inventory_id IN (
-                         SELECT id FROM inventories 
-                         WHERE user_id = $1
-                            OR id IN (SELECT inventory_id FROM inventory_shares WHERE shared_with_user_id = $1)
-                            OR user_id IN (SELECT grantor_user_id FROM user_access_grants WHERE grantee_user_id = $1)
+                         SELECT inventory_id FROM inventory_access WHERE user_id = $1
                      )
                  )
                  SELECT 
@@ -2827,10 +2746,7 @@ impl DatabaseService {
                  FROM items i
                  CROSS JOIN totals t
                  WHERE i.inventory_id IN (
-                     SELECT id FROM inventories 
-                     WHERE user_id = $1
-                        OR id IN (SELECT inventory_id FROM inventory_shares WHERE shared_with_user_id = $1)
-                        OR user_id IN (SELECT grantor_user_id FROM user_access_grants WHERE grantee_user_id = $1)
+                     SELECT inventory_id FROM inventory_access WHERE user_id = $1
                  )
                  GROUP BY i.category, t.grand_total
                  ORDER BY total_value DESC",
