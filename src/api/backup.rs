@@ -24,7 +24,7 @@ use crate::models::{
 };
 
 /// Directory where backup files are stored
-const BACKUPS_DIR: &str = "backups";
+pub const BACKUPS_DIR: &str = "backups";
 
 /// Backup file format written by this version
 const FORMAT_VERSION: &str = "2.0";
@@ -47,7 +47,7 @@ fn all_digits(s: &str, len: usize) -> bool {
 }
 
 /// Whether `name` has the shape of a backup file name this application generates:
-/// `home_registry[_auto_pre_restore]_YYYY.MM.DD.HH.MM.SS[.mmm_xxxxxxxx][_N].json`.
+/// `home_registry[_auto_pre_restore|_pre_migration_vNNN]_YYYY.MM.DD.HH.MM.SS[.mmm_xxxxxxxx][_N].json`.
 ///
 /// Nothing else is accepted for download, restore or delete, which rules out path traversal
 /// (no separators, no `..`, only digits, hex and fixed words).
@@ -58,6 +58,7 @@ pub fn is_valid_backup_filename(name: &str) -> bool {
     };
     let rest = stem
         .strip_prefix("home_registry_auto_pre_restore_")
+        .or_else(|| strip_pre_migration_prefix(stem))
         .or_else(|| stem.strip_prefix("home_registry_"));
     let Some(rest) = rest else {
         return false;
@@ -99,6 +100,18 @@ pub fn is_valid_backup_filename(name: &str) -> bool {
         return !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit());
     }
     tail.is_empty()
+}
+
+/// `home_registry_pre_migration_v<N>_`: backups written automatically before a migration that
+/// removes data (see `startup::protect_legacy_data_before_migration`).
+fn strip_pre_migration_prefix(stem: &str) -> Option<&str> {
+    let rest = stem.strip_prefix("home_registry_pre_migration_v")?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=4).contains(&digits) {
+        rest[digits..].strip_prefix('_')
+    } else {
+        None
+    }
 }
 
 /// Validate a backup filename taken from a request

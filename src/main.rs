@@ -80,6 +80,18 @@ async fn main() -> std::io::Result<()> {
         },
     };
 
+    // Migration V026 deletes tables no release ever wrote to. If they hold data anyway, write a
+    // backup first, and do not migrate (or start) if that backup cannot be written.
+    if let Err(e) = home_registry::startup::protect_legacy_data_before_migration(
+        &pool,
+        std::path::Path::new(home_registry::api::backup::BACKUPS_DIR),
+    )
+    .await
+    {
+        log::error!("Refusing to start: {}", e);
+        std::process::exit(1);
+    }
+
     // Run database migrations automatically at startup
     // Migrations are embedded in the binary and applied idempotently
     log::info!("Running database migrations...");

@@ -169,15 +169,6 @@ async fn seed(pool: &deadpool_postgres::Pool) -> Seed {
         .unwrap();
     db.enable_totp(totp_user, "2fa_only").await.unwrap();
 
-    // Tables that H-09 will drop still exist and must be carried along
-    client
-        .batch_execute(
-            "INSERT INTO categories (name) VALUES ('cat');
-             INSERT INTO tags (name) VALUES ('tag');",
-        )
-        .await
-        .unwrap();
-
     Seed {
         owner,
         totp_user,
@@ -1046,4 +1037,87 @@ async fn uploads_are_validated_first_and_never_overwrite() {
         &third.name
     ));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+}
+
+// ---------------------------------------------------------------- backups from before V026
+
+/// A scratch database at V025 holding one user, inventory and item; returns the item id
+async fn v025_database() -> (ScratchDb, i32) {
+    let scratch = ScratchDb::create_up_to(25).await;
+    let username = common::test_username("old");
+    common::create_test_user(&scratch.pool, &username).await;
+    let user_id = DatabaseService::new(scratch.pool.clone())
+        .get_user_by_username(&username)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let inventory = common::create_test_inventory(&scratch.pool, user_id, "Old")
+        .await
+        .unwrap();
+    let item = common::create_test_item(&scratch.pool, inventory, "Hammer")
+        .await
+        .unwrap();
+    (scratch, item)
+}
+
+#[actix_web::test]
+async fn restoring_a_pre_v026_backup_with_empty_legacy_tables_gives_no_warnings() {
+    let (mut scratch, _item) = v025_database().await;
+    let db = DatabaseService::new(scratch.pool.clone());
+    let export = db.export_all_data().await.unwrap();
+    // The old backup does contain the six tables (empty) and the category_id column (NULL)
+    assert!(export.tables.0.contains_key("tags"));
+    assert!(export.tables.0["items"][0]
+        .as_object()
+        .unwrap()
+        .contains_key("category_id"));
+
+    scratch.apply_migration(26).await;
+    let report = db.import_all_data(&export.tables, &[]).await.unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(row_count(&scratch.pool, "items").await, 1);
+}
+
+#[actix_web::test]
+async fn restoring_a_pre_v026_backup_reports_how_much_data_it_had_to_skip() {
+    let (mut scratch, item) = v025_database().await;
+    let client = scratch.pool.get().await.unwrap();
+    client
+        .batch_execute(
+            "INSERT INTO tags (name) VALUES ('a'), ('b'), ('c'), ('d'), ('e'), ('f'), ('g'),
+                                           ('h'), ('i'), ('j'), ('k'), ('l');
+             INSERT INTO categories (name) VALUES ('Tools');",
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "UPDATE items SET category_id = (SELECT id FROM categories LIMIT 1) WHERE id = $1",
+            &[&item],
+        )
+        .await
+        .unwrap();
+    let db = DatabaseService::new(scratch.pool.clone());
+    let export = db.export_all_data().await.unwrap();
+    drop(client);
+
+    scratch.apply_migration(26).await;
+    let report = db.import_all_data(&export.tables, &[]).await.unwrap();
+    let warnings = report.warnings.join("\n");
+    assert!(
+        warnings.contains("Skipped 12 rows from 'tags'"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("Skipped 1 row from 'categories'"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("Skipped 1 value of column 'category_id' in 'items'"),
+        "{warnings}"
+    );
+    // Nothing else is reported, and the rest of the data came back
+    assert_eq!(report.warnings.len(), 3, "{warnings}");
+    assert_eq!(row_count(&scratch.pool, "items").await, 1);
 }

@@ -69,9 +69,41 @@ pub struct ScratchDb {
     pub schema_version: i64,
 }
 
+/// Migration files from `migrations/`, sorted by version: (version, name, path).
+#[allow(dead_code)]
+fn migration_files() -> Vec<(i32, String, std::path::PathBuf)> {
+    let mut files: Vec<_> = std::fs::read_dir("migrations")
+        .expect("migrations directory")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "sql"))
+        .map(|path| {
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let (version, name) = stem
+                .trim_start_matches('V')
+                .split_once("__")
+                .expect("migration file name");
+            (
+                version.parse().expect("migration version"),
+                name.to_string(),
+                path,
+            )
+        })
+        .collect();
+    files.sort_by_key(|(version, _, _)| *version);
+    files
+}
+
 #[allow(dead_code)]
 impl ScratchDb {
+    /// A scratch database with every migration applied.
     pub async fn create() -> Self {
+        Self::create_up_to(i32::MAX).await
+    }
+
+    /// A scratch database with no tables at all (not even migration bookkeeping), for tests
+    /// that let the real migration runner build the schema.
+    pub async fn create_bare() -> Self {
         let name = format!("home_registry_scratch_{}", uuid::Uuid::new_v4().simple());
         let admin = test_db_config(Some("postgres"))
             .create_pool(Some(Runtime::Tokio1), NoTls)
@@ -87,10 +119,34 @@ impl ScratchDb {
         let pool = test_db_config(Some(&name))
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .expect("scratch pool");
-        let client = pool.get().await.expect("scratch connection");
+        Self {
+            name,
+            pool,
+            schema_version: 0,
+        }
+    }
 
+    /// `DATABASE_URL` that points a server process at this scratch database.
+    pub fn database_url(&self) -> String {
+        let base = env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:password@localhost:5432/home_inventory_test".to_string()
+        });
+        let (server, _) = base
+            .rsplit_once('/')
+            .expect("database url has a database name");
+        format!("{server}/{}", self.name)
+    }
+
+    /// A scratch database migrated only up to and including `max_version`, for testing a
+    /// migration against the state just before it. Apply later ones with `apply_migration`.
+    pub async fn create_up_to(max_version: i32) -> Self {
+        let mut scratch = Self::create_bare().await;
         // Same bookkeeping table the migration runner keeps
-        client
+        scratch
+            .pool
+            .get()
+            .await
+            .expect("scratch connection")
             .batch_execute(
                 "CREATE TABLE refinery_schema_history (
                      version INT4 PRIMARY KEY, name VARCHAR(255),
@@ -98,44 +154,35 @@ impl ScratchDb {
             )
             .await
             .expect("bookkeeping table");
-
-        let mut files: Vec<_> = std::fs::read_dir("migrations")
-            .expect("migrations directory")
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "sql"))
-            .collect();
-        files.sort();
-        let mut schema_version = 0i64;
-        for file in files {
-            let stem = file.file_stem().unwrap().to_string_lossy().to_string();
-            let (version, migration_name) = stem
-                .trim_start_matches('V')
-                .split_once("__")
-                .expect("migration file name");
-            let version: i32 = version.parse().expect("migration version");
-            let sql = std::fs::read_to_string(&file).expect("read migration");
-            client
-                .batch_execute(&sql)
-                .await
-                .unwrap_or_else(|e| panic!("applying {stem}: {e}"));
-            client
-                .execute(
-                    "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
-                     VALUES ($1, $2, 'test', 'test')",
-                    &[&version, &migration_name],
-                )
-                .await
-                .expect("record migration");
-            schema_version = i64::from(version);
+        for (version, _, _) in migration_files() {
+            if version <= max_version {
+                scratch.apply_migration(version).await;
+            }
         }
-        drop(client);
+        scratch
+    }
 
-        Self {
-            name,
-            pool,
-            schema_version,
-        }
+    /// Apply one migration file and record it in the bookkeeping table.
+    pub async fn apply_migration(&mut self, version: i32) {
+        let (_, name, path) = migration_files()
+            .into_iter()
+            .find(|(v, _, _)| *v == version)
+            .unwrap_or_else(|| panic!("no migration V{version}"));
+        let sql = std::fs::read_to_string(&path).expect("read migration");
+        let client = self.pool.get().await.expect("scratch connection");
+        client
+            .batch_execute(&sql)
+            .await
+            .unwrap_or_else(|e| panic!("applying V{version}: {e}"));
+        client
+            .execute(
+                "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+                 VALUES ($1, $2, 'test', 'test')",
+                &[&version, &name],
+            )
+            .await
+            .expect("record migration");
+        self.schema_version = i64::from(version);
     }
 }
 

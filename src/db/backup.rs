@@ -313,10 +313,14 @@ impl DatabaseService {
             if BACKUP_EXCLUDED_TABLES.contains(&name.as_str()) || db_tables.contains(name) {
                 continue;
             }
+            // Only worth reporting when the backup actually held data for it
             let count = rows.as_array().map_or(0, Vec::len);
-            report.warnings.push(format!(
-                "Table '{name}' no longer exists in this version and was skipped ({count} rows)"
-            ));
+            if count > 0 {
+                report.warnings.push(format!(
+                    "Skipped {count} {} from '{name}', a table that no longer exists in this version",
+                    if count == 1 { "row" } else { "rows" }
+                ));
+            }
         }
         // Tables this database has that the backup does not: they end up empty
         for table in &db_tables {
@@ -392,11 +396,20 @@ impl DatabaseService {
                     insert_columns.push(column);
                 }
             }
-            // Backup columns the table no longer has (dropped by a later migration)
+            // Backup columns the table no longer has (dropped by a later migration). Only
+            // reported when some row had a value for it; an all-NULL column lost nothing.
             for key in first.keys() {
-                if !columns.iter().any(|c| &c.name == key) {
+                if columns.iter().any(|c| &c.name == key) {
+                    continue;
+                }
+                let with_value = rows_array
+                    .iter()
+                    .filter(|row| row.get(key).is_some_and(|v| !v.is_null()))
+                    .count();
+                if with_value > 0 {
                     report.warnings.push(format!(
-                        "Column '{key}' of table '{table}' no longer exists in this version and was skipped"
+                        "Skipped {with_value} {} of column '{key}' in '{table}', a column that no longer exists in this version",
+                        if with_value == 1 { "value" } else { "values" }
                     ));
                 }
             }
