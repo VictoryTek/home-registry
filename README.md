@@ -202,14 +202,18 @@ The application supports the following configuration through environment variabl
 | `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` | No |
 | `JWT_SECRET` | Secret key for JWT token signing (auto-generated if not set) | Auto-generated | No* |
 | `JWT_TOKEN_LIFETIME_HOURS` | JWT token expiration time in hours | `24` | No |
-| `RATE_LIMIT_RPS` | Maximum API requests per second | `50` | No |
-| `RATE_LIMIT_BURST` | Burst capacity for temporary traffic spikes | `100` | No |
+| `RATE_LIMIT_RPS` | Sustained API requests per second per client (enforced over 60 s) | `50` | No |
+| `RATE_LIMIT_BURST` | Maximum API requests per client in any 1-second window | `100` | No |
+| `AUTH_RATE_LIMIT_PER_MINUTE` | Requests per minute per client to login, register, setup and recovery endpoints | `20` | No |
+| `TRUST_PROXY_HEADERS` | Identify clients by `Forwarded` / `X-Forwarded-For` (only behind a trusted reverse proxy) | `false` | No |
 
 **\*JWT_SECRET Note:** If not explicitly set, a random secret is generated and persisted to `/app/data/jwt_secret`. This ensures tokens remain valid across container restarts. For production, it's recommended to set this explicitly.
 
 **Rate Limiting Explained:**
-- **RATE_LIMIT_RPS**: Controls sustained API request throughput. If set to `100`, the server accepts up to 100 requests per second continuously.
-- **RATE_LIMIT_BURST**: Allows temporary spikes above the RPS limit. With `BURST: 200`, the server can handle short bursts of 200 requests before enforcing the RPS limit.
+- **RATE_LIMIT_RPS**: Sustained request rate per client. `100` allows 6,000 requests in any 60-second window.
+- **RATE_LIMIT_BURST**: Short spikes. `200` allows at most 200 requests per client within any 1-second window.
+- **AUTH_RATE_LIMIT_PER_MINUTE**: Flood guard for the unauthenticated credential endpoints. Repeated wrong passwords or recovery codes are additionally locked out per username and client address (5 failures lock that pair for 15 minutes; the response is `429` with a `Retry-After` header).
+- **TRUST_PROXY_HEADERS**: Clients are identified by their connection address. Behind a reverse proxy that is the proxy's address, so every user would share one rate-limit bucket. Set this to `true` **only** if the app is reachable exclusively through your proxy (do not publish port 8210 to the network); otherwise clients can spoof their address and evade the limits. Your proxy must also *overwrite* (not append to) `X-Forwarded-For`/`Forwarded`, e.g. nginx `proxy_set_header X-Forwarded-For $remote_addr;`, because the first address in the header is the one used. The server logs a warning if it sees forwarding headers while this is off. IPv6 clients are limited per `/64` prefix.
 - **Use Case**: Protects your server from being overwhelmed by aggressive API clients, accidental infinite loops, or potential DoS attacks.
 - **Production Recommendation**: Start with `RPS: 100` and `BURST: 200`, then adjust based on your usage patterns and server capacity.
 
@@ -286,6 +290,8 @@ provide `POSTGRES_PASSWORD` for that role.
 | `openFirewall` | bool | `true` | Open `port`/tcp in `networking.firewall`. |
 | `rateLimitRps` | int or null | `null` | Optional `RATE_LIMIT_RPS` override. |
 | `rateLimitBurst` | int or null | `null` | Optional `RATE_LIMIT_BURST` override. |
+| `authRateLimitPerMinute` | int or null | `null` | Optional `AUTH_RATE_LIMIT_PER_MINUTE` override. |
+| `trustProxyHeaders` | bool | `false` | Sets `TRUST_PROXY_HEADERS`; enable only behind a trusted reverse proxy. |
 | `database.createLocally` | bool | `false` | Provision a local PostgreSQL database/role via `services.postgresql.ensureDatabases`/`ensureUsers`, and sync its password from `environmentFile` on every service start. |
 | `database.host` | str | `"127.0.0.1"` | `POSTGRES_HOST`. |
 | `database.port` | port | `5432` | `POSTGRES_PORT`. |

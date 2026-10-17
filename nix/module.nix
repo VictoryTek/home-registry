@@ -95,6 +95,22 @@ in
       description = "Optional override for RATE_LIMIT_BURST.";
     };
 
+    authRateLimitPerMinute = mkOption {
+      type = types.nullOr types.int;
+      default = null;
+      description = "Optional override for AUTH_RATE_LIMIT_PER_MINUTE (credential endpoint requests per client per minute).";
+    };
+
+    trustProxyHeaders = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Identify clients by Forwarded / X-Forwarded-For (TRUST_PROXY_HEADERS). Enable only if the
+        app is reachable solely through your reverse proxy (leave `openFirewall` off in that case).
+        The proxy must overwrite, not append to, X-Forwarded-For.
+      '';
+    };
+
     database = {
       createLocally = mkOption {
         type = types.bool;
@@ -201,7 +217,11 @@ in
         // optionalAttrs (cfg.rateLimitRps != null) { RATE_LIMIT_RPS = toString cfg.rateLimitRps; }
         // optionalAttrs (cfg.rateLimitBurst != null) {
           RATE_LIMIT_BURST = toString cfg.rateLimitBurst;
-        };
+        }
+        // optionalAttrs (cfg.authRateLimitPerMinute != null) {
+          AUTH_RATE_LIMIT_PER_MINUTE = toString cfg.authRateLimitPerMinute;
+        }
+        // optionalAttrs cfg.trustProxyHeaders { TRUST_PROXY_HEADERS = "true"; };
       in
       {
         description = "home-registry self-hosted inventory server";

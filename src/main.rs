@@ -7,20 +7,17 @@
 #![allow(clippy::module_name_repetitions)]
 
 use actix_cors::Cors;
-use actix_extensible_rate_limit::{
-    backend::memory::InMemoryBackend, backend::SimpleInput, RateLimiter,
-};
 use actix_files as fs;
 use actix_web::{
-    dev::ServiceRequest,
     middleware::{DefaultHeaders, Logger},
     web, App, HttpResponse, HttpServer, Responder,
 };
 use dotenvy::dotenv;
 use refinery::embed_migrations;
-use std::{env, time::Duration};
+use std::env;
 
 // Use the library crate
+use home_registry::rate_limit::{RateLimitSettings, RateLimits};
 use home_registry::{api, auth, db};
 
 // Embed migrations from the migrations directory at compile time
@@ -120,53 +117,13 @@ async fn main() -> std::io::Result<()> {
     drop(client);
     log::info!("Migration client returned to pool");
 
-    // Rate limiting configuration from environment variables
-    // Migrated from actix-governor (GPL-3.0) to actix-extensible-rate-limit (MIT/Apache-2.0)
-    // These settings provide sensible defaults for a home inventory app:
-    // - 50 requests per second sustained (configurable via RATE_LIMIT_RPS)
-    // - 100 request burst capacity (configurable via RATE_LIMIT_BURST)
-    // This allows rapid page loads while protecting against accidental DoS
-    // NOTE: actix-extensible-rate-limit adds Retry-After headers to 429 responses
-    let requests_per_second = env::var("RATE_LIMIT_RPS")
-        .unwrap_or_else(|_| "50".to_string())
-        .parse::<u64>()
-        .unwrap_or(50);
-
-    let burst_size = env::var("RATE_LIMIT_BURST")
-        .unwrap_or_else(|_| "100".to_string())
-        .parse::<u64>()
-        .unwrap_or(100);
-
-    log::info!(
-        "Rate limiting: {} requests/second, burst size: {}",
-        requests_per_second,
-        burst_size
-    );
+    // Rate limiting configuration (RATE_LIMIT_RPS, RATE_LIMIT_BURST, AUTH_RATE_LIMIT_PER_MINUTE,
+    // TRUST_PROXY_HEADERS). The limiter state is created once here and shared by all workers.
+    let rate_limit_settings = RateLimitSettings::from_env();
+    rate_limit_settings.log_startup();
+    let rate_limits = RateLimits::new(rate_limit_settings);
 
     HttpServer::new(move || {
-        // Create in-memory rate limiter backend
-        // Must be created inside HttpServer closure since it's not Send
-        let backend = InMemoryBackend::builder().build();
-
-        // Configure rate limiter to key by client IP address
-        // SimpleInput includes interval, max_requests, and key for rate limiting
-        let rate_limiter = RateLimiter::builder(backend, move |req: &ServiceRequest| {
-            let rps = requests_per_second;
-            let burst = burst_size;
-            // Extract the key before entering the async block to avoid lifetime issues
-            let key = req
-                .peer_addr()
-                .map_or_else(|| "unknown".to_string(), |addr| addr.ip().to_string());
-            async move {
-                Ok(SimpleInput {
-                    interval: Duration::from_millis(1000 / rps),
-                    max_requests: burst,
-                    key,
-                })
-            }
-        })
-        .add_headers()
-        .build();
         // Configure CORS
         let cors = Cors::default()
             .allowed_origin_fn(|origin, _req_head| {
@@ -228,8 +185,7 @@ async fn main() -> std::io::Result<()> {
             // API routes - apply rate limiting ONLY to API endpoints, not static assets
             // This prevents rate limiting from affecting frontend assets, logos, health checks, etc.
             .service(
-                api::init_routes()
-                    .wrap(rate_limiter.clone()) // Rate limit scoped to /api/* routes only
+                rate_limits.protect(api::init_routes()) // Rate limit scoped to /api/* routes only
             )
             .route("/health", web::get().to(health))
             // Serve static assets (js, css, images, etc.)

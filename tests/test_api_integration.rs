@@ -1415,3 +1415,96 @@ async fn test_generate_recovery_codes_requires_current_password() {
 
     common::delete_test_user(&pool, &username).await.ok();
 }
+
+// ==================== Failed-attempt throttling ====================
+
+#[actix_web::test]
+async fn test_login_and_recovery_lockouts_are_per_user_and_ip() {
+    let pool = common::create_test_pool();
+    home_registry::auth::get_or_init_jwt_secret();
+
+    let app = test::init_service(
+        App::new().app_data(web::Data::new(pool.clone())).service(
+            web::scope("/api")
+                .service(api::auth::login)
+                .service(api::auth::use_recovery_code),
+        ),
+    )
+    .await;
+
+    let username = common::test_username("lockout");
+    common::create_test_user(&pool, &username).await;
+    let attacker = "10.9.0.1:4000";
+    let owner = "10.9.0.2:4000";
+
+    let login = |name: &str, password: &str, peer: &str| {
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .peer_addr(peer.parse().unwrap())
+            .set_json(json!({ "username": name, "password": password }))
+            .to_request()
+    };
+
+    // Five wrong passwords from one address are ordinary 401s ...
+    for _ in 0..5 {
+        let resp = test::call_service(&app, login(&username, "WrongPassword1!", attacker)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    // ... after which even the right password is refused from that address, with Retry-After
+    let resp = test::call_service(&app, login(&username, &common::test_password(), attacker)).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after: u64 = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("Retry-After header");
+    assert!(retry_after > 0);
+
+    // The lock follows the normalised username, not the exact spelling
+    let resp = test::call_service(
+        &app,
+        login(&format!("  {}  ", username.to_uppercase()), "x", attacker),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // The real owner, from another address, is not locked out
+    let resp = test::call_service(&app, login(&username, &common::test_password(), owner)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Unknown usernames are throttled exactly like real ones
+    let ghost = common::test_username("ghost");
+    for _ in 0..5 {
+        let resp = test::call_service(&app, login(&ghost, "WrongPassword1!", attacker)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let resp = test::call_service(&app, login(&ghost, "WrongPassword1!", attacker)).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Recovery-code attempts have their own lockout
+    let recover = |name: &str, peer: &str| {
+        test::TestRequest::post()
+            .uri("/api/auth/recovery-codes/use")
+            .peer_addr(peer.parse().unwrap())
+            .set_json(json!({
+                "username": name,
+                "recovery_code": "AAAA-BBBB-CCCC",
+                "new_password": "AnotherPassword1!"
+            }))
+            .to_request()
+    };
+    // (Login and recovery share one counter per username and address, so the account used
+    // above is already locked from `attacker`; use a fresh name to see the recovery path count.)
+    let recovery_target = common::test_username("ghost_rc");
+    for _ in 0..5 {
+        let resp = test::call_service(&app, recover(&recovery_target, attacker)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    let resp = test::call_service(&app, recover(&recovery_target, attacker)).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let resp = test::call_service(&app, recover(&username, attacker)).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    common::delete_test_user(&pool, &username).await.ok();
+}

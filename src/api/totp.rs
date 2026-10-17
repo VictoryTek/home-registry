@@ -8,9 +8,11 @@ use deadpool_postgres::Pool;
 use log::{error, info, warn};
 use uuid::Uuid;
 
+use crate::auth::throttle::{self, Subject};
 use crate::auth::totp::{generate_totp_setup, verify_totp_code};
 use crate::auth::{
     extract_token, generate_token, hash_password, validate_password, verify_password, verify_token,
+    PasswordWorkError,
 };
 use crate::db::DatabaseService;
 use crate::models::{
@@ -18,6 +20,7 @@ use crate::models::{
     TotpRecoveryRequest, TotpSetupResponse, TotpStatusResponse, TotpVerifyRequest,
     TotpVerifySetupRequest, TotpVerifySetupResponse,
 };
+use crate::rate_limit::client_ip_key;
 
 use super::auth::get_auth_context_from_request;
 
@@ -379,9 +382,15 @@ pub async fn totp_verify(
 #[post("/auth/totp/recover")]
 pub async fn totp_recover(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     body: web::Json<TotpRecoveryRequest>,
 ) -> Result<impl Responder> {
     let db_service = DatabaseService::new(pool.get_ref().clone());
+    let client_ip = client_ip_key(&http_req);
+
+    if let Err(wait) = throttle::global().check(Subject::Username(&body.username), &client_ip) {
+        return Ok(crate::api::auth::throttled_response(wait));
+    }
 
     // Validate new password first
     if let Err(msg) = validate_password(&body.new_password) {
@@ -391,6 +400,11 @@ pub async fn totp_recover(
             message: Some("Invalid password".to_string()),
         }));
     }
+
+    // Count the attempt before any branch can return, so every generic failure (unknown or
+    // inactive user, TOTP not enabled, wrong code) is throttled identically and the
+    // lockout cannot be used to tell which usernames exist. Success clears it below.
+    throttle::global().record_failure(Subject::Username(&body.username), &client_ip);
 
     // Look up user (don't reveal existence on failure)
     let Ok(Some(user)) = db_service.get_user_by_username(&body.username).await else {
@@ -469,11 +483,15 @@ pub async fn totp_recover(
             message: Some("Invalid username, code, or password".to_string()),
         }));
     }
+    throttle::global().record_success(Subject::Username(&body.username), &client_ip);
 
     // Hash new password
     let password_hash = match hash_password(body.new_password.clone()).await {
         Ok(h) => h,
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error hashing password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
@@ -606,6 +624,9 @@ pub async fn totp_disable(
         match verify_password(body.password.clone(), user.password_hash.clone()).await {
             Ok(valid) => valid,
             Err(e) => {
+                if matches!(e, PasswordWorkError::Busy) {
+                    return Ok(crate::api::auth::busy_response());
+                }
                 error!("Error verifying password: {}", e);
                 return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                     success: false,

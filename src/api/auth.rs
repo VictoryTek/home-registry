@@ -10,9 +10,11 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use uuid::Uuid;
 
+use crate::auth::throttle::{self, Subject};
 use crate::auth::{
     extract_token, generate_partial_token, generate_token, hash_password, validate_password,
-    validate_username, verify_password, verify_token, AuthContext,
+    validate_username, verify_against_dummy, verify_password, verify_token, AuthContext,
+    PasswordWorkError, ARGON2_RETRY_AFTER_SECS,
 };
 use crate::db::DatabaseService;
 use crate::models::{
@@ -24,8 +26,36 @@ use crate::models::{
     UpdateInventoryShareRequest, UpdateProfileRequest, UpdateUserSettingsRequest,
     UseRecoveryCodeRequest, UserResponse,
 };
+use crate::rate_limit::client_ip_key;
+
+/// Recovery codes issued per user (and verifications done per recovery attempt).
+const RECOVERY_CODE_COUNT: usize = 10;
 
 // ==================== Helper Functions ====================
+
+/// 429 for a locked-out username/IP, with `Retry-After` rounded up to whole seconds.
+pub(crate) fn throttled_response(wait: std::time::Duration) -> HttpResponse {
+    let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    HttpResponse::TooManyRequests()
+        .insert_header(("Retry-After", secs.max(1).to_string()))
+        .json(ErrorResponse {
+            success: false,
+            // The login page shows `error`, so the wait goes there
+            error: format!("Too many attempts. Try again in {} seconds.", secs.max(1)),
+            message: None,
+        })
+}
+
+/// 503 when the Argon2 worker pool stayed saturated for the whole wait.
+pub(crate) fn busy_response() -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .insert_header(("Retry-After", ARGON2_RETRY_AFTER_SECS.to_string()))
+        .json(ErrorResponse {
+            success: false,
+            error: "Server busy. Please try again in a moment.".to_string(),
+            message: None,
+        })
+}
 
 /// Extract and verify auth context from request
 pub async fn get_auth_context_from_request(
@@ -193,6 +223,9 @@ pub async fn initial_setup(
     let password_hash = match hash_password(req.password.clone()).await {
         Ok(hash) => hash,
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error hashing password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
@@ -260,13 +293,39 @@ pub async fn initial_setup(
 
 /// User login
 #[post("/auth/login")]
-pub async fn login(pool: web::Data<Pool>, req: web::Json<LoginRequest>) -> Result<impl Responder> {
+pub async fn login(
+    pool: web::Data<Pool>,
+    http_req: HttpRequest,
+    req: web::Json<LoginRequest>,
+) -> Result<impl Responder> {
     let db_service = DatabaseService::new(pool.get_ref().clone());
+    let client_ip = client_ip_key(&http_req);
+
+    // Locked-out username/IP pairs are turned away before any password work
+    if let Err(wait) = throttle::global().check(Subject::Username(&req.username), &client_ip) {
+        return Ok(throttled_response(wait));
+    }
 
     // Find user by username
     let user = match db_service.get_user_by_username(&req.username).await {
         Ok(Some(u)) => u,
         Ok(None) => {
+            // Spend the same Argon2 time as a real check so timing does not reveal
+            // whether the username exists
+            if let Err(e) = verify_against_dummy(req.password.clone()).await {
+                error!("Error during dummy password verification: {}", e);
+                return Ok(match e {
+                    PasswordWorkError::Busy => busy_response(),
+                    PasswordWorkError::Hash(_) => {
+                        HttpResponse::InternalServerError().json(ErrorResponse {
+                            success: false,
+                            error: "Password verification failed".to_string(),
+                            message: None,
+                        })
+                    },
+                });
+            }
+            throttle::global().record_failure(Subject::Username(&req.username), &client_ip);
             // Don't reveal whether username exists
             return Ok(HttpResponse::Unauthorized().json(ErrorResponse {
                 success: false,
@@ -300,6 +359,9 @@ pub async fn login(pool: web::Data<Pool>, req: web::Json<LoginRequest>) -> Resul
         match verify_password(req.password.clone(), user.password_hash.clone()).await {
             Ok(valid) => valid,
             Err(e) => {
+                if matches!(e, PasswordWorkError::Busy) {
+                    return Ok(crate::api::auth::busy_response());
+                }
                 error!("Error verifying password: {}", e);
                 return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                     success: false,
@@ -310,12 +372,14 @@ pub async fn login(pool: web::Data<Pool>, req: web::Json<LoginRequest>) -> Resul
         };
 
     if !password_valid {
+        throttle::global().record_failure(Subject::Username(&req.username), &client_ip);
         return Ok(HttpResponse::Unauthorized().json(ErrorResponse {
             success: false,
             error: "Invalid credentials".to_string(),
             message: Some("Username or password is incorrect".to_string()),
         }));
     }
+    throttle::global().record_success(Subject::Username(&req.username), &client_ip);
 
     // Check if user has TOTP enabled with a mode that requires login verification.
     // A failed lookup must not fall through to a full token.
@@ -446,6 +510,9 @@ pub async fn register(
     let password_hash = match hash_password(req.password.clone()).await {
         Ok(hash) => hash,
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error hashing password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
@@ -601,6 +668,13 @@ pub async fn change_password(
         Err(response) => return Ok(response),
     };
 
+    // A stolen token must not be able to guess the current password without limit
+    let throttle_subject = Subject::UserId(auth_ctx.user_id);
+    let client_ip = client_ip_key(&req);
+    if let Err(wait) = throttle::global().check(throttle_subject, &client_ip) {
+        return Ok(throttled_response(wait));
+    }
+
     // Validate new password
     if let Err(msg) = validate_password(&body.new_password) {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
@@ -637,6 +711,9 @@ pub async fn change_password(
         match verify_password(body.current_password.clone(), user.password_hash).await {
             Ok(valid) => valid,
             Err(e) => {
+                if matches!(e, PasswordWorkError::Busy) {
+                    return Ok(crate::api::auth::busy_response());
+                }
                 error!("Error verifying password: {}", e);
                 return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                     success: false,
@@ -647,17 +724,22 @@ pub async fn change_password(
         };
 
     if !password_valid {
+        throttle::global().record_failure(throttle_subject, &client_ip);
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
             success: false,
             error: "Current password is incorrect".to_string(),
             message: None,
         }));
     }
+    throttle::global().record_success(throttle_subject, &client_ip);
 
     // Hash new password
     let password_hash = match hash_password(body.new_password.clone()).await {
         Ok(hash) => hash,
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error hashing password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
@@ -879,6 +961,9 @@ pub async fn admin_create_user(
     let password_hash = match hash_password(body.password.clone()).await {
         Ok(hash) => hash,
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error hashing password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
@@ -995,6 +1080,9 @@ pub async fn admin_update_user(
         let password_hash = match hash_password(password.clone()).await {
             Ok(h) => h,
             Err(e) => {
+                if matches!(e, PasswordWorkError::Busy) {
+                    return Ok(crate::api::auth::busy_response());
+                }
                 error!("Error hashing password: {}", e);
                 return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                     success: false,
@@ -1922,6 +2010,12 @@ pub async fn generate_recovery_codes(
         Err(e) => return Ok(e),
     };
 
+    let throttle_subject = Subject::UserId(auth.user_id);
+    let client_ip = client_ip_key(&req);
+    if let Err(wait) = throttle::global().check(throttle_subject, &client_ip) {
+        return Ok(throttled_response(wait));
+    }
+
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     // Re-authenticate before touching any existing codes
@@ -1945,8 +2039,9 @@ pub async fn generate_recovery_codes(
     };
 
     match verify_password(body.current_password.clone(), user.password_hash).await {
-        Ok(true) => {},
+        Ok(true) => throttle::global().record_success(throttle_subject, &client_ip),
         Ok(false) => {
+            throttle::global().record_failure(throttle_subject, &client_ip);
             // 400, not 401: the frontend treats any 401 as an expired session
             return Ok(HttpResponse::BadRequest().json(ErrorResponse {
                 success: false,
@@ -1955,6 +2050,9 @@ pub async fn generate_recovery_codes(
             }));
         },
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error verifying password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,
@@ -1966,10 +2064,10 @@ pub async fn generate_recovery_codes(
 
     // Generate 10 random recovery codes
     let mut rng = rand::thread_rng();
-    let mut plain_codes: Vec<String> = Vec::with_capacity(10);
-    let mut code_hashes: Vec<String> = Vec::with_capacity(10);
+    let mut plain_codes: Vec<String> = Vec::with_capacity(RECOVERY_CODE_COUNT);
+    let mut code_hashes: Vec<String> = Vec::with_capacity(RECOVERY_CODE_COUNT);
 
-    for _ in 0..10 {
+    for _ in 0..RECOVERY_CODE_COUNT {
         // Generate code in format: XXXX-XXXX-XXXX (12 alphanumeric chars with dashes)
         let code: String = (&mut rng)
             .sample_iter(&Alphanumeric)
@@ -1985,6 +2083,9 @@ pub async fn generate_recovery_codes(
         let hash = match hash_password(formatted_code.clone()).await {
             Ok(h) => h,
             Err(e) => {
+                if matches!(e, PasswordWorkError::Busy) {
+                    return Ok(crate::api::auth::busy_response());
+                }
                 error!("Error hashing recovery code: {}", e);
                 return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                     success: false,
@@ -2137,9 +2238,15 @@ pub async fn confirm_recovery_codes(
 #[post("/auth/recovery-codes/use")]
 pub async fn use_recovery_code(
     pool: web::Data<Pool>,
+    http_req: HttpRequest,
     body: web::Json<UseRecoveryCodeRequest>,
 ) -> Result<impl Responder> {
     let db_service = DatabaseService::new(pool.get_ref().clone());
+    let client_ip = client_ip_key(&http_req);
+
+    if let Err(wait) = throttle::global().check(Subject::Username(&body.username), &client_ip) {
+        return Ok(throttled_response(wait));
+    }
 
     // Validate new password
     if let Err(msg) = validate_password(&body.new_password) {
@@ -2150,21 +2257,17 @@ pub async fn use_recovery_code(
         }));
     }
 
+    let invalid = || {
+        HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Invalid username or recovery code".to_string(),
+            message: None,
+        })
+    };
+
     // Find user by username
     let user = match db_service.get_user_by_username(&body.username).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            // Don't reveal if user exists
-            warn!(
-                "Recovery code attempt for non-existent user: {}",
-                body.username
-            );
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Invalid username or recovery code".to_string(),
-                message: None,
-            }));
-        },
+        Ok(user) => user.filter(|u| u.is_active),
         Err(e) => {
             error!("Error finding user: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
@@ -2175,61 +2278,53 @@ pub async fn use_recovery_code(
         },
     };
 
-    if !user.is_active {
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            success: false,
-            error: "Invalid username or recovery code".to_string(),
-            message: None,
-        }));
-    }
-
-    // Get unused recovery codes for this user
-    let codes = match db_service.get_unused_recovery_codes(user.id).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Error getting recovery codes: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "An error occurred".to_string(),
-                message: None,
-            }));
+    // Get unused recovery codes (none for unknown or inactive users)
+    let codes = match &user {
+        Some(u) => match db_service.get_unused_recovery_codes(u.id).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Error getting recovery codes: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                    success: false,
+                    error: "An error occurred".to_string(),
+                    message: None,
+                }));
+            },
         },
+        None => Vec::new(),
     };
 
-    if codes.is_empty() {
-        // Don't reveal that user has no codes
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            success: false,
-            error: "Invalid username or recovery code".to_string(),
-            message: None,
-        }));
-    }
-
-    // Check each code to find a match
+    // Always do the work of RECOVERY_CODE_COUNT verifications and never stop at a match, so
+    // response time reveals neither whether the account exists nor how many codes are left.
     let mut matched_code_id: Option<Uuid> = None;
-    for (code_id, code_hash) in &codes {
-        if verify_password(body.recovery_code.clone(), code_hash.clone())
-            .await
-            .unwrap_or(false)
+    for (code_id, code_hash) in codes.iter().take(RECOVERY_CODE_COUNT) {
+        match verify_password(body.recovery_code.clone(), code_hash.clone()).await {
+            Ok(true) => matched_code_id = matched_code_id.or(Some(*code_id)),
+            Err(PasswordWorkError::Busy) => return Ok(busy_response()),
+            Ok(false) | Err(PasswordWorkError::Hash(_)) => {},
+        }
+    }
+    for _ in codes.len().min(RECOVERY_CODE_COUNT)..RECOVERY_CODE_COUNT {
+        if let Err(PasswordWorkError::Busy) = verify_against_dummy(body.recovery_code.clone()).await
         {
-            matched_code_id = Some(*code_id);
-            break;
+            return Ok(busy_response());
         }
     }
 
-    let Some(code_id) = matched_code_id else {
-        warn!("Invalid recovery code attempt for user {}", user.username);
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-            success: false,
-            error: "Invalid username or recovery code".to_string(),
-            message: None,
-        }));
+    let (Some(user), Some(code_id)) = (user, matched_code_id) else {
+        throttle::global().record_failure(Subject::Username(&body.username), &client_ip);
+        warn!("Invalid recovery code attempt");
+        return Ok(invalid());
     };
+    throttle::global().record_success(Subject::Username(&body.username), &client_ip);
 
     // Hash new password
     let new_password_hash = match hash_password(body.new_password.clone()).await {
         Ok(h) => h,
         Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
             error!("Error hashing new password: {}", e);
             return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
                 success: false,

@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 4 / 19 high · 0 / 46 medium · 0 / 25 low
+**Progress:** 5 / 19 high · 0 / 47 medium · 0 / 25 low
 
 ---
 
@@ -26,10 +26,11 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
   Source: BUGS-SEC3. File: `src/api/auth.rs:321-357`. `get_totp_settings(...).ok().flatten()` and the `if let Ok(mode)` parse both fall through to a full token on error. Return 500 on lookup error and treat an unknown mode as "TOTP required".
 - [x] **H-04 — Require the current password to regenerate recovery codes**
   Source: BUGS-SEC4. Files: `src/api/auth.rs:1923-1994`, frontend `RecoveryCodesSection`. A stolen JWT currently regenerates codes, resets the password, and locks the owner out.
-- [ ] **H-05 — Rate limiter fix + bound unauthenticated Argon2 work**
+- [x] **H-05 — Rate limiter fix + bound unauthenticated Argon2 work**
   Sources: ARCH-A4, BUGS-SEC5, BUGS-SEC14 (rate-limit part). Files: `src/main.rs:130-170`, `src/api/auth.rs:2174-2185`.
   Also cover password-verifying authenticated endpoints (`PUT /auth/password`, `POST /auth/recovery-codes/generate`): a stolen token can otherwise guess the password there.
   Build the limiter backend once (not per worker), correct `interval/max_requests` (currently ~5,000 req/s), guard `RATE_LIMIT_RPS=0`, key on real client IP behind a trusted proxy, and add per-account/per-IP attempt limits on login/register/recovery. Replace "verify against 10 hashes" for recovery codes with a single lookup.
+  Done in H-05 except the single-lookup recovery codes, which moved to **M-47**.
 - [ ] **H-06 — Token versioning, auth context from the DB user, and "sign out everywhere"**
   Sources: ARCH-A5, BUGS-SEC8, FEAT-G1. Files: `src/auth/mod.rs:143-217, 280-288`, `src/api/auth.rs:63-102`, new migration (`users.token_version`).
   Build `AuthContext.is_admin` from the loaded row (demoted admins lose access immediately), invalidate tokens on password change/reset/recovery/deactivation, add the Settings button.
@@ -84,6 +85,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [ ] **M-06 — Stop swallowing security-relevant write failures (`let _ =`)** — BUGS-ERR1. Counter increments/resets, `mark_recovery_code_used`, `create_user_settings`, `try_exists().unwrap_or(false)`.
 - [ ] **M-07 — Cookie-auth fallback and localhost CORS: finish or remove** — ARCH-H3. `src/auth/mod.rs:219-237`, `src/main.rs:170-188`.
 - [ ] **M-08 — Reduce XSS blast radius: CSP without `unsafe-inline/unsafe-eval`, token handling** — BUGS-SEC13 (self-hosting fonts/icons from ARCH-D6 is the enabler).
+- [ ] **M-47 — Single-lookup recovery code verification** — split out of H-05. `POST /auth/recovery-codes/use` still verifies against all of a user's (up to 10) Argon2 hashes per attempt (H-05 pads to exactly 10 so timing is constant, and the throttle plus Argon2 concurrency cap bound the cost). A single lookup needs a new indexed lookup column (e.g. an HMAC of the code). Existing codes are stored only as Argon2 hashes and cannot be backfilled, so this needs the column plus a fallback scan for old rows, or forced regeneration. `src/api/auth.rs`, `src/db/mod.rs`, new migration.
 
 ### Correctness
 - [ ] **M-09 — Recovery codes: atomic one-time use and atomic regeneration** — BUGS-BUG10. `UPDATE ... WHERE is_used = false`, transaction around delete/insert/update.

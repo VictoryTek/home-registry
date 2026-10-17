@@ -3,6 +3,7 @@
 //! Provides JWT token handling, password hashing with Argon2, auth middleware for Actix-Web,
 //! and TOTP-based two-factor authentication.
 
+pub mod throttle;
 pub mod totp;
 
 use actix_web::HttpRequest;
@@ -13,7 +14,9 @@ use argon2::{
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use std::env;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::models::{Claims, User};
@@ -238,17 +241,76 @@ pub fn extract_token(req: &HttpRequest) -> Option<String> {
 
 // ==================== Password Hashing ====================
 
+/// Why password hashing or verification did not produce a result.
+#[derive(Debug)]
+pub enum PasswordWorkError {
+    /// Too many hashes were already running; the caller should answer 503 and retry later.
+    Busy,
+    /// The hashing library failed.
+    Hash(argon2::password_hash::Error),
+}
+
+impl std::fmt::Display for PasswordWorkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => write!(f, "password hashing capacity exhausted"),
+            Self::Hash(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for PasswordWorkError {}
+
+impl From<argon2::password_hash::Error> for PasswordWorkError {
+    fn from(e: argon2::password_hash::Error) -> Self {
+        Self::Hash(e)
+    }
+}
+
+/// How long a request waits for an Argon2 slot before being turned away.
+const ARGON2_WAIT: Duration = Duration::from_secs(2);
+/// `Retry-After` value sent with the 503 for a turned-away request.
+pub const ARGON2_RETRY_AFTER_SECS: u64 = 2;
+
+/// Argon2 uses ~19 MiB and a full core per hash, so only a few may run at once; the rest wait
+/// briefly and then get a 503 instead of queueing without bound.
+fn argon2_permits() -> &'static Arc<Semaphore> {
+    static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let cpus = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+        Arc::new(Semaphore::new(cpus.max(2)))
+    })
+}
+
+async fn acquire_slot(
+    permits: &Arc<Semaphore>,
+    wait: Duration,
+) -> Result<OwnedSemaphorePermit, PasswordWorkError> {
+    match tokio::time::timeout(wait, permits.clone().acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(PasswordWorkError::Busy),
+    }
+}
+
+async fn acquire_argon2_slot() -> Result<OwnedSemaphorePermit, PasswordWorkError> {
+    acquire_slot(argon2_permits(), ARGON2_WAIT).await
+}
+
 /// Hash a password using Argon2id
 /// Uses `spawn_blocking` to avoid blocking the async runtime
-pub async fn hash_password(password: String) -> Result<String, argon2::password_hash::Error> {
-    tokio::task::spawn_blocking(move || {
+pub async fn hash_password(password: String) -> Result<String, PasswordWorkError> {
+    let permit = acquire_argon2_slot().await?;
+    tokio::task::spawn_blocking(move || -> Result<String, argon2::password_hash::Error> {
+        // Held by the blocking task itself, so a dropped request cannot free the slot early
+        let _permit = permit;
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
         let password_hash = argon2.hash_password(password.as_bytes(), &salt)?;
         Ok(password_hash.to_string())
     })
     .await
-    .map_err(|_| argon2::password_hash::Error::Algorithm)?
+    .map_err(|_| PasswordWorkError::Hash(argon2::password_hash::Error::Algorithm))?
+    .map_err(PasswordWorkError::from)
 }
 
 /// Verify a password against a hash
@@ -256,15 +318,31 @@ pub async fn hash_password(password: String) -> Result<String, argon2::password_
 pub async fn verify_password(
     password: String,
     hash_str: String,
-) -> Result<bool, argon2::password_hash::Error> {
-    tokio::task::spawn_blocking(move || {
+) -> Result<bool, PasswordWorkError> {
+    let permit = acquire_argon2_slot().await?;
+    tokio::task::spawn_blocking(move || -> Result<bool, argon2::password_hash::Error> {
+        let _permit = permit;
         let parsed_hash = PasswordHash::new(&hash_str)?;
         Ok(Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
             .is_ok())
     })
     .await
-    .map_err(|_| argon2::password_hash::Error::Algorithm)?
+    .map_err(|_| PasswordWorkError::Hash(argon2::password_hash::Error::Algorithm))?
+    .map_err(PasswordWorkError::from)
+}
+
+/// Do the same Argon2 work as a real verification, against a throwaway hash.
+///
+/// Used when the account does not exist so response time does not reveal which usernames are
+/// registered. The result is meaningless and always discarded.
+pub async fn verify_against_dummy(password: String) -> Result<(), PasswordWorkError> {
+    static DUMMY_HASH: OnceCell<String> = OnceCell::const_new();
+    let hash = DUMMY_HASH
+        .get_or_try_init(|| hash_password("dummy-password-for-timing-equalisation".to_string()))
+        .await?
+        .clone();
+    verify_password(password, hash).await.map(|_| ())
 }
 
 // ==================== Auth Context ====================
@@ -358,6 +436,22 @@ pub fn create_token(user_id: &Uuid, username: &str) -> Result<String, jsonwebtok
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn saturated_argon2_slots_turn_requests_away_instead_of_queueing() {
+        let permits = Arc::new(Semaphore::new(1));
+        let held = acquire_slot(&permits, Duration::from_millis(50))
+            .await
+            .expect("first slot is free");
+        let started = std::time::Instant::now();
+        let second = acquire_slot(&permits, Duration::from_millis(50)).await;
+        assert!(matches!(second, Err(PasswordWorkError::Busy)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(held);
+        assert!(acquire_slot(&permits, Duration::from_millis(50))
+            .await
+            .is_ok());
+    }
+
     use super::*;
 
     #[test]
