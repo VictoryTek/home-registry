@@ -667,7 +667,7 @@ async fn test_item_crud_with_all_fields() {
 
     // Create item with all fields populated
     let request = home_registry::models::CreateItemRequest {
-        inventory_id: Some(inventory_id),
+        inventory_id,
         name: "Complete Item".to_string(),
         description: Some("Full description".to_string()),
         category: Some("Electronics".to_string()),
@@ -819,7 +819,7 @@ async fn test_item_foreign_key_constraint() {
 
     // Try to create item with non-existent inventory_id
     let request = home_registry::models::CreateItemRequest {
-        inventory_id: Some(99999), // Non-existent
+        inventory_id: 99999, // Non-existent
         name: "Invalid Item".to_string(),
         description: None,
         category: None,

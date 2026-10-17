@@ -589,7 +589,14 @@ const LEGACY_BACKUP: &str = r#"{
        "user_id": "11111111-1111-1111-1111-111111111111",
        "created_at": "2025-01-01T00:00:00+00:00", "updated_at": "2025-01-01T00:00:00+00:00"}
     ],
-    "items": [],
+    "items": [
+      {"id": 7, "inventory_id": 1, "name": "Old Hammer", "description": null, "category": "Tools",
+       "location": null, "purchase_date": null, "purchase_price": 12.5, "warranty_expiry": null,
+       "notes": null, "quantity": 1, "image_url": null, "purchase_link": null,
+       "warranty_info": null, "condition": null, "serial_number": null, "manufacturer": null,
+       "model": null, "category_id": null,
+       "created_at": "2025-01-01T00:00:00+00:00", "updated_at": "2025-01-01T00:00:00+00:00"}
+    ],
     "legacy_widgets": [{"id": 1}]
   }
 }"#;
@@ -627,6 +634,19 @@ async fn a_legacy_1_0_backup_still_restores_with_warnings() {
     assert_eq!(row.get::<_, i32>(1), 1);
     assert_eq!(row_count(&scratch.pool, "users").await, 1);
     assert_eq!(row_count(&scratch.pool, "user_totp_settings").await, 0);
+
+    // The legacy item came back in the inventory the 1.0 export recorded for it, now that the
+    // column has no default (V027); its all-NULL category_id column is not worth a warning
+    let item = client
+        .query_one(
+            "SELECT inventory_id, name::text FROM items WHERE id = 7",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(item.get::<_, i32>(0), 1);
+    assert_eq!(item.get::<_, String>(1), "Old Hammer");
+    assert!(!warnings.contains("category_id"), "{warnings}");
 }
 
 #[actix_web::test]
@@ -693,6 +713,7 @@ async fn a_restore_ends_every_session_even_for_tokens_that_were_already_revoked(
     backup.metadata.version = "2.0".into();
     backup.data.0.remove("legacy_widgets");
     backup.data.0.remove("inventories");
+    backup.data.0.remove("items"); // the fixture item belongs to the removed inventory
     backup.data.0.insert(
         "users".into(),
         json!([
@@ -1120,4 +1141,88 @@ async fn restoring_a_pre_v026_backup_reports_how_much_data_it_had_to_skip() {
     // Nothing else is reported, and the rest of the data came back
     assert_eq!(report.warnings.len(), 3, "{warnings}");
     assert_eq!(row_count(&scratch.pool, "items").await, 1);
+}
+
+// ---------------------------------------------------------------- required columns
+
+#[actix_web::test]
+async fn an_item_row_without_an_inventory_is_refused_naming_the_row() {
+    let scratch = ScratchDb::create().await;
+    seed(&scratch.pool).await;
+    let db = DatabaseService::new(scratch.pool.clone());
+    let before = snapshot(&scratch.pool).await;
+    let export = db.export_all_data().await.unwrap();
+    assert!(export.tables.row_count("items") >= 2);
+
+    // The key is missing from the second row's object entirely
+    let mut missing = export.tables.clone();
+    let item_id = {
+        let row = missing.0.get_mut("items").unwrap()[1]
+            .as_object_mut()
+            .unwrap();
+        row.remove("inventory_id");
+        row["id"].clone()
+    };
+    let err = db
+        .import_all_data(&missing, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("table 'items'"), "{err}");
+    assert!(err.contains("column 'inventory_id'"), "{err}");
+    assert!(err.contains("row 2"), "{err}");
+    assert!(err.contains(&format!("id {item_id}")), "{err}");
+
+    // Or present but null
+    let mut null = export.tables.clone();
+    null.0.get_mut("items").unwrap()[0]["inventory_id"] = Value::Null;
+    let err = db
+        .import_all_data(&null, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("row 1") && err.contains("'inventory_id'"),
+        "{err}"
+    );
+
+    // Nothing was written, and no item was filed into some other inventory by a default
+    assert_eq!(snapshot(&scratch.pool).await, before);
+}
+
+#[actix_web::test]
+async fn database_errors_in_a_restore_say_what_failed_without_echoing_row_values() {
+    let scratch = ScratchDb::create().await;
+    seed(&scratch.pool).await;
+    let db = DatabaseService::new(scratch.pool.clone());
+    let mut export = db.export_all_data().await.unwrap();
+
+    // Two users with the same username violate a unique constraint
+    let users = export
+        .tables
+        .0
+        .get_mut("users")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    let duplicate = users[0].clone();
+    users.push({
+        let mut copy = duplicate.clone();
+        copy["id"] = json!(Uuid::new_v4());
+        copy
+    });
+    let err = db
+        .import_all_data(&export.tables, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("table 'users'"), "{err}");
+    assert!(err.contains("duplicate key"), "{err}");
+    assert!(err.contains("constraint"), "{err}");
+    // The failing row would contain the password hash: it must not be in the message
+    let hash = duplicate["password_hash"].as_str().unwrap();
+    assert!(
+        !err.contains(hash),
+        "row values leaked into the error: {err}"
+    );
 }

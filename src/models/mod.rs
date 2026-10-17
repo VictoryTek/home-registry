@@ -57,7 +57,9 @@ pub struct UpdateInventoryRequest {
 
 #[derive(Deserialize, Debug, Validate)]
 pub struct CreateItemRequest {
-    pub inventory_id: Option<i32>,
+    /// The inventory the item is created in. Required: there is no default inventory.
+    #[validate(range(min = 1, message = "inventory_id must be a positive integer"))]
+    pub inventory_id: i32,
     #[validate(length(min = 1, max = 255, message = "Name must be 1-255 characters"))]
     pub name: String,
     #[validate(length(max = 5000, message = "Description must be under 5000 characters"))]

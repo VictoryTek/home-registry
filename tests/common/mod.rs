@@ -370,7 +370,7 @@ pub async fn create_test_item(
 
     let db = DatabaseService::new(pool.clone());
     let request = CreateItemRequest {
-        inventory_id: Some(inventory_id),
+        inventory_id,
         name: name.to_string(),
         description: Some("Test item description".to_string()),
         category: None,

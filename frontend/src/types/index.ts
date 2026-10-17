@@ -94,7 +94,8 @@ export interface UpdateInventoryRequest {
 }
 
 export interface CreateItemRequest {
-  inventory_id?: number;
+  // Required: the server has no default inventory
+  inventory_id: number;
   name: string;
   description?: string;
   category?: string;

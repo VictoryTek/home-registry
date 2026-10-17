@@ -212,13 +212,15 @@ struct Column {
     generated: bool,
     /// `GENERATED ALWAYS AS IDENTITY`: inserting needs `OVERRIDING SYSTEM VALUE`
     identity_always: bool,
+    /// `NOT NULL` with no default (and not generated): every restored row must supply it
+    required: bool,
 }
 
 async fn table_columns(tx: &Transaction<'_>, table: &str) -> Result<Vec<Column>, BoxError> {
     let regclass = format!("public.{}", quote_ident(table));
     let rows = tx
         .query(
-            "SELECT attname::text, attgenerated::text, attidentity::text
+            "SELECT attname::text, attgenerated::text, attidentity::text, attnotnull, atthasdef
              FROM pg_attribute
              WHERE attrelid = $1::text::regclass AND attnum > 0 AND NOT attisdropped
              ORDER BY attnum",
@@ -230,13 +232,59 @@ async fn table_columns(tx: &Transaction<'_>, table: &str) -> Result<Vec<Column>,
         .map(|r| {
             let generated: String = r.get(1);
             let identity: String = r.get(2);
+            let not_null: bool = r.get(3);
+            let has_default: bool = r.get(4);
             Column {
                 name: r.get(0),
                 generated: !generated.is_empty(),
                 identity_always: identity == "a",
+                // An identity column fills itself in, like a default
+                required: not_null && !has_default && generated.is_empty() && identity.is_empty(),
             }
         })
         .collect())
+}
+
+/// Refuse early, with a precise message, when the backup cannot satisfy a column this version
+/// requires (`NOT NULL`, no default): the whole key is missing, or some row has no value.
+/// Without this the database would only report a bare constraint violation, and a missing
+/// value must never be papered over with a default (an item with no inventory is the example
+/// that motivated it).
+fn check_required_columns(
+    table: &str,
+    columns: &[Column],
+    rows: &[serde_json::Value],
+) -> Result<(), BoxError> {
+    for column in columns.iter().filter(|c| c.required) {
+        let missing = rows
+            .iter()
+            .position(|row| row.get(&column.name).is_none_or(serde_json::Value::is_null));
+        if let Some(index) = missing {
+            let row = &rows[index];
+            let which = match row.get("id") {
+                Some(id) => format!("row {} (id {id})", index + 1),
+                None => format!("row {}", index + 1),
+            };
+            return Err(format!(
+                "the backup is not usable: {which} of table '{table}' has no value for column '{}', which this version requires",
+                column.name
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Describe a database error without echoing row contents (a constraint violation's detail
+/// would print the failing row, which can hold password hashes).
+fn describe_db_error(error: &tokio_postgres::Error) -> String {
+    let Some(db) = error.as_db_error() else {
+        return error.to_string();
+    };
+    match db.constraint() {
+        Some(constraint) => format!("{} (constraint {constraint})", db.message()),
+        None => db.message().to_string(),
+    }
 }
 
 /// `INSERT` statement for one table's rows (bound as `$1`, a JSON array).
@@ -419,11 +467,15 @@ impl DatabaseService {
                 )
                 .into());
             }
+            check_required_columns(table, &columns, rows_array)?;
 
             let statement = insert_statement(table, &insert_columns);
-            tx.execute(statement.as_str(), &[rows])
-                .await
-                .map_err(|e| format!("restoring table '{table}' failed: {e}"))?;
+            tx.execute(statement.as_str(), &[rows]).await.map_err(|e| {
+                format!(
+                    "restoring table '{table}' failed: {}",
+                    describe_db_error(&e)
+                )
+            })?;
             report.rows_restored += rows_array.len() as u64;
         }
 
@@ -551,11 +603,13 @@ mod tests {
             name: "id".into(),
             generated: false,
             identity_always: true,
+            required: false,
         };
         let name = Column {
             name: "name".into(),
             generated: false,
             identity_always: false,
+            required: true,
         };
         let sql = insert_statement("things", &[&id, &name]);
         assert!(

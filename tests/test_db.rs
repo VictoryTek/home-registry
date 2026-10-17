@@ -323,7 +323,7 @@ async fn test_create_item() {
         .expect("Failed to create inventory");
 
     let request = home_registry::models::CreateItemRequest {
-        inventory_id: Some(inventory_id),
+        inventory_id,
         name: "Test Item".to_string(),
         description: Some("Test item description".to_string()),
         category: Some("Electronics".to_string()),
@@ -877,7 +877,7 @@ async fn test_create_item_with_null_optional_fields() {
         .unwrap();
 
     let request = home_registry::models::CreateItemRequest {
-        inventory_id: Some(inventory_id),
+        inventory_id,
         name: "Minimal Item".to_string(),
         description: None,
         category: None,

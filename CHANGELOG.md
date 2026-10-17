@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking (API): `POST /api/items` now requires `inventory_id`.** It must be a positive integer.
+  Omitting it, or sending `0` or a negative number, returns `400`; a body without the field is
+  rejected while the JSON is parsed. Previously a request without it silently created the item in
+  inventory #1, which belongs to whoever created the first inventory. The web interface always
+  sent it. Migration V027 removes the database default behind this behaviour
+  (`items.inventory_id` no longer defaults to `1`); existing items are not changed. Updating an
+  item (`PUT /api/items/{id}`) is unchanged: `inventory_id` stays optional and means "move".
+
 ## [0.1.0-beta.3] - 2026-02-20
 
 ### Added

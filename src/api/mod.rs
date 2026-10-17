@@ -530,21 +530,20 @@ pub async fn create_item(
     http_req: HttpRequest,
     req: web::Json<CreateItemRequest>,
 ) -> Result<impl Responder> {
-    // Items default to inventory 1 when none is given (see H-10), so authorize against that
-    let target_inventory = req.inventory_id.unwrap_or(1);
-    if let Err(resp) =
-        authorize_inventory(pool.get_ref(), &http_req, target_inventory, Perm::AddItems).await
-    {
-        return Ok(resp);
-    }
-
-    // Validate input before processing
+    // Validate first, so a malformed inventory_id (0, negative) is a clear 400 rather than an
+    // authorization failure; the item must name its inventory, there is no default
     if let Err(validation_errors) = req.validate() {
         return Ok(HttpResponse::BadRequest().json(ErrorResponse {
             success: false,
             error: "Validation failed".to_string(),
             message: Some(validation_errors.to_string()),
         }));
+    }
+
+    if let Err(resp) =
+        authorize_inventory(pool.get_ref(), &http_req, req.inventory_id, Perm::AddItems).await
+    {
+        return Ok(resp);
     }
 
     let db_service = DatabaseService::new(pool.get_ref().clone());

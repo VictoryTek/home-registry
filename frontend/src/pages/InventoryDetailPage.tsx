@@ -170,6 +170,13 @@ export function InventoryDetailPage() {
   }, [items, openItemId]);
 
   const handleAddItem = async () => {
+    // The server has no default inventory: never send an item without a valid one
+    const inventoryId = parseInt(id ?? '', 10);
+    if (!Number.isInteger(inventoryId) || inventoryId < 1) {
+      showToast('This page has no valid inventory', 'error');
+      return;
+    }
+
     if (!newItem.name.trim()) {
       showToast('Please enter an item name', 'error');
       return;
@@ -194,7 +201,7 @@ export function InventoryDetailPage() {
     try {
       const result = await itemApi.create({
         ...newItem,
-        inventory_id: parseInt(id ?? '0', 10),
+        inventory_id: inventoryId,
       });
 
       if (result.success && result.data) {

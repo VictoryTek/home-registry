@@ -48,7 +48,7 @@ fn test_create_inventory_validation() {
 fn test_create_item_validation() {
     // Valid item
     let valid = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Test Item".to_string(),
         description: Some("Test description".to_string()),
         category: Some("Electronics".to_string()),
@@ -63,7 +63,7 @@ fn test_create_item_validation() {
 
     // Invalid: empty name
     let invalid = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: String::new(),
         description: None,
         category: None,
@@ -78,7 +78,7 @@ fn test_create_item_validation() {
 
     // Invalid: price negative
     let invalid = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Valid Name".to_string(),
         description: None,
         category: None,
@@ -93,7 +93,7 @@ fn test_create_item_validation() {
 
     // Invalid: price too high
     let invalid = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Valid Name".to_string(),
         description: None,
         category: None,
@@ -108,7 +108,7 @@ fn test_create_item_validation() {
 
     // Invalid: quantity negative
     let invalid = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Valid Name".to_string(),
         description: None,
         category: None,
@@ -123,7 +123,7 @@ fn test_create_item_validation() {
 
     // Invalid: quantity too high
     let invalid = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Valid Name".to_string(),
         description: None,
         category: None,
@@ -298,7 +298,7 @@ fn test_login_request_validation() {
 fn test_item_model_with_optional_fields() {
     // Test that item creation works with minimal fields
     let minimal = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Minimal Item".to_string(),
         description: None,
         category: None,
@@ -313,7 +313,7 @@ fn test_item_model_with_optional_fields() {
 
     // Test with all optional fields populated
     let complete = CreateItemRequest {
-        inventory_id: Some(1),
+        inventory_id: 1,
         name: "Complete Item".to_string(),
         description: Some("Full description".to_string()),
         category: Some("Electronics".to_string()),
@@ -430,4 +430,33 @@ mod effective_permissions {
         assert!(!none.can_view && !none.can_edit_items && !none.can_delete_inventory);
         assert_eq!(none.permission_source, PermissionSource::None);
     }
+}
+
+// ==================== CreateItemRequest.inventory_id is required ====================
+
+#[test]
+fn test_create_item_requires_a_positive_inventory_id() {
+    // Missing from the JSON: no default inventory
+    let missing: Result<CreateItemRequest, _> = serde_json::from_str(r#"{"name": "Drill"}"#);
+    let err = missing.expect_err("inventory_id is required");
+    assert!(err.to_string().contains("inventory_id"), "{err}");
+
+    // null is not a value either
+    assert!(serde_json::from_str::<CreateItemRequest>(
+        r#"{"inventory_id": null, "name": "Drill"}"#
+    )
+    .is_err());
+
+    // Present but not a valid id
+    for bad in [0, -1, -42] {
+        let request: CreateItemRequest =
+            serde_json::from_str(&format!(r#"{{"inventory_id": {bad}, "name": "Drill"}}"#))
+                .unwrap();
+        let errors = request.validate().expect_err("must be rejected");
+        assert!(errors.to_string().contains("inventory_id"), "{errors}");
+    }
+
+    let ok: CreateItemRequest =
+        serde_json::from_str(r#"{"inventory_id": 7, "name": "Drill"}"#).unwrap();
+    assert!(ok.validate().is_ok());
 }

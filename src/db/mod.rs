@@ -310,7 +310,7 @@ impl DatabaseService {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
              RETURNING id, inventory_id, name, description, category, location, purchase_date::text, purchase_price::float8, warranty_expiry::text, notes, quantity, created_at, updated_at",
                 &[
-                    &request.inventory_id.unwrap_or(1),
+                    &request.inventory_id,
                     &request.name,
                     &request.description,
                     &request.category,

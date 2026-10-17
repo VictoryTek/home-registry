@@ -250,6 +250,7 @@ UNION ALL SELECT 'items.category_id', count(*) FROM items WHERE category_id IS N
 
 - **If any count is above zero,** the server writes a backup before migrating and logs the counts and the file name at WARN. It is `backups/home_registry_pre_migration_v026_<timestamp>_<id>.json` and also appears under **Settings → Backup & Restore**. If that backup cannot be written (for example the `backups` volume is read-only), the server **refuses to start** and the database is left unchanged; fix the volume and start again.
 - **The app cannot restore those rows after the migration:** a restore skips tables that no longer exist and reports how many rows it skipped. They stay readable in the backup file.
+- **Migration V027: items must name their inventory.** `POST /api/items` now requires `inventory_id` (a positive integer) and returns `400` without it; before, an omitted value silently filed the item into inventory #1. The web interface already sent it. Custom API clients must be updated, and the database column no longer has a default. Existing items are unchanged.
 - **Downgrading** to a version older than V026 against a migrated database fails, because the older version expects those tables. To go back, restore a backup taken before the upgrade using the older version.
 
 ## Nix / NixOS Deployment
