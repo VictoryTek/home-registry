@@ -1082,3 +1082,184 @@ async fn test_view_share_is_forbidden_to_modify_and_move_requires_destination() 
     common::delete_test_user(&pool, &owner_username).await.ok();
     common::delete_test_user(&pool, &viewer_username).await.ok();
 }
+
+// ==================== Share and Image Ownership Tests ====================
+
+#[actix_web::test]
+async fn test_share_and_image_endpoints_enforce_ownership() {
+    use home_registry::models::PermissionLevel;
+
+    let pool = common::create_test_pool();
+
+    let app = test::init_service(
+        App::new().app_data(web::Data::new(pool.clone())).service(
+            web::scope("/api")
+                .service(api::auth::update_inventory_share)
+                .service(api::auth::delete_inventory_share)
+                .service(api::delete_image)
+                .service(api::get_inventory_item_images),
+        ),
+    )
+    .await;
+
+    let owner_name = common::test_username("own_owner");
+    let viewer_name = common::test_username("own_viewer");
+    let other_viewer_name = common::test_username("own_viewer2");
+    let stranger_name = common::test_username("own_stranger");
+    for name in [
+        &owner_name,
+        &viewer_name,
+        &other_viewer_name,
+        &stranger_name,
+    ] {
+        common::create_test_user(&pool, name).await;
+    }
+
+    let db = home_registry::db::DatabaseService::new(pool.clone());
+    let owner = db.get_user_by_username(&owner_name).await.unwrap().unwrap();
+    let viewer = db
+        .get_user_by_username(&viewer_name)
+        .await
+        .unwrap()
+        .unwrap();
+    let other_viewer = db
+        .get_user_by_username(&other_viewer_name)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let inventory_id = common::create_test_inventory(&pool, owner.id, "Shared Inventory")
+        .await
+        .unwrap();
+    let viewer_share = db
+        .create_inventory_share(inventory_id, viewer.id, owner.id, PermissionLevel::View)
+        .await
+        .unwrap();
+    let other_share = db
+        .create_inventory_share(
+            inventory_id,
+            other_viewer.id,
+            owner.id,
+            PermissionLevel::View,
+        )
+        .await
+        .unwrap();
+
+    // An item in the inventory that references an uploaded image
+    let item_id = common::create_test_item(&pool, inventory_id, "Item With Image")
+        .await
+        .unwrap();
+    let image_name = format!("{}_1.png", uuid::Uuid::new_v4().simple());
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "UPDATE items SET image_url = $1 WHERE id = $2",
+            &[&format!("/uploads/img/{image_name}"), &item_id],
+        )
+        .await
+        .unwrap();
+
+    let viewer_token = common::get_test_token(&pool, &viewer_name).await;
+    let stranger_token = common::get_test_token(&pool, &stranger_name).await;
+    let owner_token = common::get_test_token(&pool, &owner_name).await;
+    let bearer = |t: &str| ("Authorization", format!("Bearer {t}"));
+
+    // A view sharee cannot raise their own share
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/shares/{}", viewer_share.id))
+        .insert_header(bearer(&viewer_token))
+        .set_json(json!({ "permission_level": "edit_inventory" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // ...nor delete somebody else's share
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/shares/{}", other_share.id))
+        .insert_header(bearer(&viewer_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // A stranger learns nothing about the share
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/shares/{}", viewer_share.id))
+        .insert_header(bearer(&stranger_token))
+        .set_json(json!({ "permission_level": "edit_inventory" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/shares/{}", viewer_share.id))
+        .insert_header(bearer(&stranger_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // Image / item-images: stranger gets 404, a view-only sharee cannot delete the image
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/inventories/{inventory_id}/item-images"))
+        .insert_header(bearer(&stranger_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/images/{image_name}"))
+        .insert_header(bearer(&stranger_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/images/{image_name}"))
+        .insert_header(bearer(&viewer_token))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let req = test::TestRequest::get()
+        .uri(&format!("/api/inventories/{inventory_id}/item-images"))
+        .insert_header(bearer(&viewer_token))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);
+
+    // The owner can update a share; the sharee can then leave on their own
+    let req = test::TestRequest::put()
+        .uri(&format!("/api/shares/{}", viewer_share.id))
+        .insert_header(bearer(&owner_token))
+        .set_json(json!({ "permission_level": "edit_items" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);
+    let req = test::TestRequest::delete()
+        .uri(&format!("/api/shares/{}", viewer_share.id))
+        .insert_header(bearer(&viewer_token))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);
+
+    // Cleanup
+    common::delete_test_item(&pool, item_id).await.ok();
+    common::delete_test_inventory(&pool, inventory_id)
+        .await
+        .ok();
+    for name in [
+        &owner_name,
+        &viewer_name,
+        &other_viewer_name,
+        &stranger_name,
+    ] {
+        common::delete_test_user(&pool, name).await.ok();
+    }
+}

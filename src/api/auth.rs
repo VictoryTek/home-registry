@@ -1348,13 +1348,24 @@ pub async fn update_inventory_share(
     path: web::Path<Uuid>,
     body: web::Json<UpdateInventoryShareRequest>,
 ) -> Result<impl Responder> {
-    let _auth = match get_auth_context_from_request(&req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
-
     let share_id = path.into_inner();
     let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    // Only someone who can manage sharing on the share's inventory may change it
+    if let Err(resp) = super::authorize_resolved(
+        pool.get_ref(),
+        &req,
+        db_service
+            .get_share_inventory_and_user(share_id)
+            .await
+            .map(|found| found.map(|(inventory_id, _)| inventory_id)),
+        "Share",
+        super::Perm::ManageSharing,
+    )
+    .await
+    {
+        return Ok(resp);
+    }
 
     // Update the share permission
     match db_service
@@ -1403,6 +1414,40 @@ pub async fn delete_inventory_share(
 
     let share_id = path.into_inner();
     let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    // The sharee may remove their own share (leave the inventory); anyone else needs
+    // permission to manage sharing on the inventory.
+    let share_info = match db_service.get_share_inventory_and_user(share_id).await {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            return Ok(HttpResponse::NotFound().json(ErrorResponse {
+                success: false,
+                error: "Resource not found".to_string(),
+                message: Some("Resource not found".to_string()),
+            }))
+        },
+        Err(e) => {
+            error!("Error looking up share: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "An internal error occurred".to_string(),
+                message: None,
+            }));
+        },
+    };
+    let (share_inventory_id, shared_with_user_id) = share_info;
+    if shared_with_user_id != auth.user_id {
+        if let Err(resp) = super::authorize_inventory(
+            pool.get_ref(),
+            &req,
+            share_inventory_id,
+            super::Perm::ManageSharing,
+        )
+        .await
+        {
+            return Ok(resp);
+        }
+    }
 
     match db_service.delete_inventory_share(share_id).await {
         Ok(true) => {

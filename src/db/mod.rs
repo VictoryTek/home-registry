@@ -1990,6 +1990,45 @@ impl DatabaseService {
         }
     }
 
+    /// Resolve the inventory and sharee of a share
+    pub async fn get_share_inventory_and_user(
+        &self,
+        share_id: Uuid,
+    ) -> Result<Option<(i32, Uuid)>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT inventory_id, shared_with_user_id FROM inventory_shares WHERE id = $1",
+                &[&share_id],
+            )
+            .await?;
+        Ok(rows.first().map(|r| (r.get(0), r.get(1))))
+    }
+
+    /// Find every place an uploaded image is referenced.
+    /// Returns `(inventory_id, is_inventory_cover)` pairs: item images and image organizer
+    /// values yield `false`, an inventory's own `image_url` yields `true`.
+    pub async fn get_image_references(
+        &self,
+        filename: &str,
+    ) -> Result<Vec<(i32, bool)>, Box<dyn std::error::Error>> {
+        let client = self.pool.get().await?;
+        let url = format!("/uploads/img/{filename}");
+        let rows = client
+            .query(
+                "SELECT inventory_id, FALSE FROM items WHERE strpos(image_url, $1) > 0
+                 UNION
+                 SELECT i.inventory_id, FALSE FROM item_organizer_values iov
+                   JOIN items i ON i.id = iov.item_id
+                  WHERE strpos(iov.text_value, $1) > 0
+                 UNION
+                 SELECT id, TRUE FROM inventories WHERE strpos(image_url, $1) > 0",
+                &[&url],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
     /// Delete inventory share
     pub async fn delete_inventory_share(
         &self,

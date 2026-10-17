@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 1 / 19 high · 0 / 46 medium · 0 / 25 low
+**Progress:** 2 / 19 high · 0 / 46 medium · 0 / 25 low
 
 ---
 
@@ -19,7 +19,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [x] **H-01 — Require authentication and per-inventory authorization on every data endpoint**
   Sources: ARCH-A1, BUGS-SEC1. Files: `src/api/mod.rs:140-950` (inventory, item, organizer, option, organizer-value handlers), `src/db/mod.rs:126-160, 391-437`.
   Today `GET /api/items`, `PUT/DELETE /api/inventories/{id}`, all item and organizer routes work with **no token**. Add a shared authorize helper that resolves item/organizer/option → inventory, loads `EffectivePermissions`, and returns 401/403/404; scope `GET /items` and `search` to accessible inventories. Frontend already sends the bearer token.
-- [ ] **H-02 — Ownership checks on share update/delete, image delete, and item-images listing**
+- [x] **H-02 — Ownership checks on share update/delete, image delete, and item-images listing**
   Source: BUGS-SEC2. Files: `src/api/auth.rs:1345-1432`, `src/api/mod.rs:1115-1215`.
   A `view` sharee can raise their own share to `edit_inventory`; any user can delete any share or any uploaded file. Require `can_manage_sharing` (or admin) on the share's inventory; require `can_view` for item-images; for image delete, require that the file is referenced by an item the caller can edit.
 - [ ] **H-03 — TOTP must fail closed at login**
@@ -95,6 +95,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [ ] **M-17 — Unknown `currency` crashes price pages; add a React error boundary** — BUGS-BUG16, BUGS-ERR4 (boundary part).
 - [ ] **M-18 — Clear client state and service-worker API cache on logout/user switch** — ARCH-A12, BUGS-BUG13.
 - [ ] **M-19 — Unify image storage (files, not base64 in Postgres) and include `uploads/` in backups** — ARCH-S2, BUGS-PERF1, (backup part of ARCH-A3). Needs **H-08**.
+  Also: record the uploader per file (so unreferenced uploads are deletable only by their uploader; H-02 leaves them deletable by any signed-in user) and serve `/uploads/img/*` behind authentication.
 - [ ] **M-20 — Retry only idempotent requests** — ARCH-A13. `frontend/src/services/api.ts:198-262`.
 - [ ] **M-21 — Server-side notifications endpoint; fix the empty Notifications page and split UI vs data context** — ARCH-A11, BUGS-BUG11.
 - [ ] **M-22 — N+1 requests and queries; per-inventory item counts from the server** — BUGS-PERF2 (pairs with FEAT-F7).

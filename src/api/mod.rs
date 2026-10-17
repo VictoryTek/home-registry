@@ -54,6 +54,7 @@ enum Perm {
     EditItems,
     RemoveItems,
     ManageOrganizers,
+    ManageSharing,
 }
 
 impl Perm {
@@ -66,6 +67,7 @@ impl Perm {
             Perm::EditItems => p.can_edit_items,
             Perm::RemoveItems => p.can_remove_items,
             Perm::ManageOrganizers => p.can_manage_organizers,
+            Perm::ManageSharing => p.can_manage_sharing,
         }
     }
 }
@@ -1554,10 +1556,9 @@ pub async fn delete_image(
     path: web::Path<String>,
 ) -> Result<impl Responder> {
     // Auth check
-    let _auth = match auth::get_auth_context_from_request(&req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
+    if let Err(e) = auth::get_auth_context_from_request(&req, pool.get_ref()).await {
+        return Ok(e);
+    }
 
     let filename = path.into_inner();
 
@@ -1572,6 +1573,28 @@ pub async fn delete_image(
             error: "Invalid filename".to_string(),
             message: Some("Filename contains invalid characters".to_string()),
         }));
+    }
+
+    // A referenced image may only be deleted by someone who can edit what references it.
+    // Unreferenced files (e.g. just uploaded, not yet saved) have no recorded owner and stay
+    // deletable; see M-19.
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+    let references = match db_service.get_image_references(&filename).await {
+        Ok(refs) => refs,
+        Err(e) => {
+            error!("Error looking up image references for {}: {}", filename, e);
+            return Ok(internal_error_response("Failed to check permissions"));
+        },
+    };
+    for (inventory_id, is_cover) in references {
+        let perm = if is_cover {
+            Perm::EditInventory
+        } else {
+            Perm::EditItems
+        };
+        if let Err(resp) = authorize_inventory(pool.get_ref(), &req, inventory_id, perm).await {
+            return Ok(resp);
+        }
     }
 
     let file_path = std::path::Path::new("uploads/img").join(&filename);
@@ -1609,13 +1632,10 @@ pub async fn get_inventory_item_images(
     pool: web::Data<Pool>,
     path: web::Path<i32>,
 ) -> Result<impl Responder> {
-    // Auth check — consistent with other inventory endpoints
-    let _auth = match auth::get_auth_context_from_request(&req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
-
     let inventory_id = path.into_inner();
+    if let Err(resp) = authorize_inventory(pool.get_ref(), &req, inventory_id, Perm::View).await {
+        return Ok(resp);
+    }
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service
