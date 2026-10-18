@@ -1,15 +1,17 @@
 pub mod auth;
 pub mod backup;
 pub mod extractors;
+mod report_csv;
 pub mod totp;
 
+use crate::db::report::{ReportError, ReportRequestError, ReportScope};
 use crate::db::DatabaseService;
 use crate::models::{
     ApiResponse, CreateInventoryRequest, CreateItemRequest, CreateOrganizerOptionRequest,
     CreateOrganizerTypeRequest, EffectivePermissions, ErrorResponse, ImageUploadResponse,
-    InventoryReportData, InventoryReportRequest, Item, ItemExportRow,
-    SetItemOrganizerValuesRequest, UpdateInventoryRequest, UpdateItemRequest,
-    UpdateOrganizerOptionRequest, UpdateOrganizerTypeRequest,
+    InventoryReportData, InventoryReportRequest, SetItemOrganizerValuesRequest,
+    UpdateInventoryRequest, UpdateItemRequest, UpdateOrganizerOptionRequest,
+    UpdateOrganizerTypeRequest,
 };
 use actix_multipart::form::{tempfile::TempFile, MultipartForm};
 use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse, Responder, Result, Scope};
@@ -1671,224 +1673,183 @@ pub async fn get_inventory_item_images(
 
 // ==================== Inventory Reporting Endpoints ====================
 
-/// Formats a collection of items as CSV data.
-///
-/// Generates a CSV file with columns for all relevant item fields including
-/// inventory name, purchase information, and calculated total values.
-///
-/// # Arguments
-/// * `items` - Vector of items to export
-/// * `inventories` - Map of inventory IDs to names for lookup
-///
-/// # Returns
-/// * `Ok(Vec<u8>)` - UTF-8 encoded CSV data ready for HTTP response
-/// * `Err` - CSV serialization or I/O errors
-fn format_items_as_csv(
-    items: Vec<Item>,
-    inventories: &std::collections::HashMap<i32, String>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut writer = csv::Writer::from_writer(vec![]);
-
-    // Write header
-    writer.write_record([
-        "ID",
-        "Inventory",
-        "Name",
-        "Description",
-        "Category",
-        "Location",
-        "Quantity",
-        "Purchase Price",
-        "Total Value",
-        "Purchase Date",
-        "Warranty Expiry",
-        "Created At",
-    ])?;
-
-    // Write data rows
-    for item in items {
-        let inventory_name = inventories
-            .get(&item.inventory_id)
-            .map_or("Unknown", std::string::String::as_str);
-
-        let total_value = item
-            .purchase_price
-            .and_then(|price| item.quantity.map(|qty| price * f64::from(qty)))
-            .map(|v| format!("{v:.2}"))
-            .unwrap_or_default();
-
-        writer.serialize(ItemExportRow {
-            id: item.id.unwrap_or(0),
-            inventory_name: inventory_name.to_string(),
-            item_name: item.name,
-            description: item.description.unwrap_or_default(),
-            category: item.category.unwrap_or_default(),
-            location: item.location.unwrap_or_default(),
-            quantity: item.quantity.unwrap_or(0),
-            purchase_price: item
-                .purchase_price
-                .map(|p| format!("{p:.2}"))
-                .unwrap_or_default(),
-            total_value,
-            purchase_date: item.purchase_date.unwrap_or_default(),
-            warranty_expiry: item.warranty_expiry.unwrap_or_default(),
-            created_at: item
-                .created_at
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default(),
-        })?;
-    }
-
-    writer.flush()?;
-    Ok(writer.into_inner()?)
+/// A 400 with a fixed message. Nothing the client sent is repeated in it.
+fn report_bad_request(error: &str, message: &str) -> HttpResponse {
+    HttpResponse::BadRequest().json(ErrorResponse {
+        success: false,
+        error: error.to_string(),
+        message: Some(message.to_string()),
+    })
 }
 
-#[get("/reports/inventory")]
-pub async fn get_inventory_report(
-    pool: web::Data<Pool>,
-    req: HttpRequest,
-    query: web::Query<InventoryReportRequest>,
-) -> Result<impl Responder> {
-    // Get authenticated user context
-    let auth = match auth::get_auth_context_from_request(&req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
+fn report_request_error(error: &ReportRequestError) -> HttpResponse {
+    match error {
+        ReportRequestError::MalformedOrganizers => report_bad_request(
+            "Invalid organizer filter",
+            "organizers must look like 3:12,3:13,4:none (organizer id, then option id or none)",
+        ),
+        ReportRequestError::TooManyOrganizers => report_bad_request(
+            "Too many organizer filters",
+            "At most 50 organizer:option pairs are allowed",
+        ),
+        ReportRequestError::NeedsInventory => report_bad_request(
+            "Inventory required",
+            "organizers and group_by need an inventory_id",
+        ),
+        ReportRequestError::UnknownOrganizer => report_bad_request(
+            "Unknown organizer or option",
+            "Use organizers and options of this inventory",
+        ),
+        ReportRequestError::NotASelect => report_bad_request(
+            "Not a select organizer",
+            "Only select organizers can be used to group or filter a report",
+        ),
+        ReportRequestError::InvalidDate => report_bad_request(
+            "Invalid date",
+            "Date must be in ISO 8601 format (YYYY-MM-DD)",
+        ),
+    }
+}
 
-    let request = query.into_inner();
+fn report_server_error(what: &str, e: &dyn std::fmt::Display) -> HttpResponse {
+    error!("{what}: {e}");
+    HttpResponse::InternalServerError().json(ErrorResponse {
+        success: false,
+        error: "An internal error occurred".to_string(),
+        message: Some(format!("Failed to {what}")),
+    })
+}
 
-    // Validate input
+/// Check a report request and resolve it against the user's access and the inventory's
+/// organizers. Every report endpoint goes through here, so they accept and refuse the same
+/// requests and describe the same items.
+async fn prepare_report(
+    db_service: &DatabaseService,
+    auth: &crate::auth::AuthContext,
+    request: InventoryReportRequest,
+) -> std::result::Result<ReportScope, HttpResponse> {
     if let Err(validation_errors) = request.validate() {
-        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+        return Err(HttpResponse::BadRequest().json(ErrorResponse {
             success: false,
             error: "Validation failed".to_string(),
             message: Some(validation_errors.to_string()),
         }));
     }
 
-    let db_service = DatabaseService::new(pool.get_ref().clone());
-    let format = request.format.as_deref().unwrap_or("json");
+    let parse_date =
+        |value: &Option<String>, name: &str| -> std::result::Result<(), HttpResponse> {
+            match value {
+                Some(text) if chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").is_err() => {
+                    Err(report_bad_request(
+                        &format!("Invalid {name} format"),
+                        "Date must be in ISO 8601 format (YYYY-MM-DD)",
+                    ))
+                },
+                _ => Ok(()),
+            }
+        };
+    parse_date(&request.from_date, "from_date")?;
+    parse_date(&request.to_date, "to_date")?;
 
-    // Validate date formats if provided
-    if let Some(ref date_str) = request.from_date {
-        if chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Invalid from_date format".to_string(),
-                message: Some("Date must be in ISO 8601 format (YYYY-MM-DD)".to_string()),
-            }));
-        }
-    }
-
-    if let Some(ref date_str) = request.to_date {
-        if chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Invalid to_date format".to_string(),
-                message: Some("Date must be in ISO 8601 format (YYYY-MM-DD)".to_string()),
-            }));
-        }
-    }
-
-    // Validate date range (from_date must not be after to_date)
-    if let (Some(ref from), Some(ref to)) = (&request.from_date, &request.to_date) {
-        if let (Ok(from_parsed), Ok(to_parsed)) = (
+    if let (Some(from), Some(to)) = (&request.from_date, &request.to_date) {
+        if let (Ok(from), Ok(to)) = (
             chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d"),
             chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d"),
         ) {
-            if to_parsed < from_parsed {
-                return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                    success: false,
-                    error: "Invalid date range".to_string(),
-                    message: Some("to_date cannot be before from_date".to_string()),
-                }));
+            if to < from {
+                return Err(report_bad_request(
+                    "Invalid date range",
+                    "to_date cannot be before from_date",
+                ));
             }
         }
     }
-
-    // Validate price range
     if let (Some(min), Some(max)) = (request.min_price, request.max_price) {
         if min > max {
-            return Ok(HttpResponse::BadRequest().json(ErrorResponse {
-                success: false,
-                error: "Invalid price range".to_string(),
-                message: Some("min_price cannot exceed max_price".to_string()),
-            }));
+            return Err(report_bad_request(
+                "Invalid price range",
+                "min_price cannot exceed max_price",
+            ));
         }
     }
 
-    // Check inventory access if specific inventory requested
-    if let Some(inv_id) = request.inventory_id {
+    // Check inventory access if a specific inventory was requested
+    if let Some(inventory_id) = request.inventory_id {
         match db_service
-            .check_inventory_access(auth.user_id, inv_id)
+            .check_inventory_access(auth.user_id, inventory_id)
             .await
         {
+            Ok(true) => {},
             Ok(false) => {
-                return Ok(HttpResponse::Forbidden().json(ErrorResponse {
+                return Err(HttpResponse::Forbidden().json(ErrorResponse {
                     success: false,
                     error: "Access denied to this inventory".to_string(),
                     message: None,
-                }))
-            },
-            Err(e) => {
-                error!("Error checking inventory access: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: "An internal error occurred".to_string(),
-                    message: None,
                 }));
             },
-            _ => {},
+            Err(e) => return Err(report_server_error("check access", &e)),
         }
     }
 
-    // Fetch report data
-    let items = match db_service
-        .get_inventory_report_data(request.clone(), auth.user_id)
-        .await
-    {
-        Ok(items) => items,
-        Err(e) => {
-            error!("Error generating report: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "Failed to generate report".to_string(),
-                message: Some(e.to_string()),
-            }));
-        },
+    match db_service.resolve_report_scope(request, auth.user_id).await {
+        Ok(scope) => Ok(scope),
+        Err(ReportError::Request(e)) => Err(report_request_error(&e)),
+        Err(ReportError::Database(e)) => Err(report_server_error("prepare the report", &e)),
+    }
+}
+
+/// Inventory report: items, statistics and a breakdown, all for the same filtered set of
+/// items (JSON), or the items as CSV with `format=csv`.
+///
+/// Filters: `inventory_id`, `from_date`, `to_date`, `min_price`, `max_price`, `organizers`
+/// (`type:option[,...]`, option an id or `none`) and the legacy `category` and `location`.
+/// `group_by=<select organizer id>` groups the breakdown by that organizer of the inventory.
+/// **Deprecated:** without `group_by` the breakdown is by the legacy `items.category` column,
+/// kept for API clients and removed together with the legacy columns (ARCH-H2).
+#[get("/reports/inventory")]
+pub async fn get_inventory_report(
+    pool: web::Data<Pool>,
+    req: HttpRequest,
+    query: web::Query<InventoryReportRequest>,
+) -> Result<impl Responder> {
+    let auth = match auth::get_auth_context_from_request(&req, pool.get_ref()).await {
+        Ok(a) => a,
+        Err(e) => return Ok(e),
+    };
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+    let scope = match prepare_report(&db_service, &auth, query.into_inner()).await {
+        Ok(scope) => scope,
+        Err(response) => return Ok(response),
     };
 
-    // Handle format selection - CSV vs JSON export
-    if format == "csv" {
-        // Fetch inventory names for CSV export
+    if scope.request.format.as_deref() == Some("csv") {
+        let bundle = match db_service.report_csv_bundle(&scope).await {
+            Ok(bundle) => bundle,
+            Err(e) => return Ok(report_server_error("generate the report", &e)),
+        };
         let inventory_names = match db_service.get_accessible_inventories(auth.user_id).await {
             Ok(inventories) => inventories
                 .into_iter()
                 .filter_map(|inv| inv.id.map(|id| (id, inv.name)))
                 .collect(),
-            Err(e) => {
-                error!("Error fetching inventories for CSV: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: "Failed to fetch inventory names".to_string(),
-                    message: Some(e.to_string()),
-                }));
-            },
+            Err(e) => return Ok(report_server_error("fetch inventory names", &e)),
         };
 
-        match format_items_as_csv(items, &inventory_names) {
+        return match report_csv::format_items_as_csv(
+            &bundle.items,
+            &inventory_names,
+            &bundle.organizer_types,
+        ) {
             Ok(csv_data) => {
                 let filename = format!(
                     "inventory-report-{}.csv",
                     chrono::Utc::now().format("%Y%m%d-%H%M%S")
                 );
-
                 info!(
                     "Generated CSV report for user {}: {} bytes",
                     auth.username,
                     csv_data.len()
                 );
-
                 Ok(HttpResponse::Ok()
                     .content_type("text/csv; charset=utf-8")
                     .insert_header((
@@ -1897,71 +1858,31 @@ pub async fn get_inventory_report(
                     ))
                     .body(csv_data))
             },
-            Err(e) => {
-                error!("Error formatting CSV for user {}: {}", auth.username, e);
-                let error_msg = if e.to_string().contains("CSV") {
-                    "CSV serialization error"
-                } else {
-                    "Failed to format CSV"
-                };
-                Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: error_msg.to_string(),
-                    message: Some(format!("Could not generate CSV export: {e}")),
-                }))
-            },
-        }
-    } else {
-        // Fetch additional data for complete report
-        let statistics = match db_service
-            .get_inventory_statistics(request.inventory_id, auth.user_id)
-            .await
-        {
-            Ok(stats) => stats,
-            Err(e) => {
-                error!("Error fetching statistics: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: "Failed to fetch statistics".to_string(),
-                    message: Some(e.to_string()),
-                }));
-            },
+            Err(e) => Ok(report_server_error("format the CSV", &e)),
         };
-
-        let category_breakdown = match db_service
-            .get_category_breakdown(request.inventory_id, auth.user_id)
-            .await
-        {
-            Ok(breakdown) => breakdown,
-            Err(e) => {
-                error!("Error fetching category breakdown: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: "Failed to fetch category breakdown".to_string(),
-                    message: Some(e.to_string()),
-                }));
-            },
-        };
-
-        let report_data = InventoryReportData {
-            statistics,
-            category_breakdown,
-            items,
-            generated_at: chrono::Utc::now(),
-            filters_applied: request,
-        };
-
-        info!("Generated JSON report for user {}", auth.username);
-
-        Ok(HttpResponse::Ok().json(ApiResponse {
-            success: true,
-            data: Some(report_data),
-            message: Some("Report generated successfully".to_string()),
-            error: None,
-        }))
     }
+
+    let bundle = match db_service.report_bundle(&scope).await {
+        Ok(bundle) => bundle,
+        Err(e) => return Ok(report_server_error("generate the report", &e)),
+    };
+    info!("Generated JSON report for user {}", auth.username);
+    Ok(HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        data: Some(InventoryReportData {
+            statistics: bundle.statistics,
+            category_breakdown: bundle.breakdown,
+            group_by: scope.group_by,
+            items: bundle.items,
+            generated_at: chrono::Utc::now(),
+            filters_applied: scope.request,
+        }),
+        message: Some("Report generated successfully".to_string()),
+        error: None,
+    }))
 }
 
+/// Statistics for the items a report would list (same parameters as `/reports/inventory`).
 #[get("/reports/inventory/statistics")]
 pub async fn get_inventory_statistics_endpoint(
     pool: web::Data<Pool>,
@@ -1972,39 +1893,13 @@ pub async fn get_inventory_statistics_endpoint(
         Ok(a) => a,
         Err(e) => return Ok(e),
     };
-
     let db_service = DatabaseService::new(pool.get_ref().clone());
-    let request = query.into_inner();
+    let scope = match prepare_report(&db_service, &auth, query.into_inner()).await {
+        Ok(scope) => scope,
+        Err(response) => return Ok(response),
+    };
 
-    // Check inventory access if specific inventory requested
-    if let Some(inv_id) = request.inventory_id {
-        match db_service
-            .check_inventory_access(auth.user_id, inv_id)
-            .await
-        {
-            Ok(false) => {
-                return Ok(HttpResponse::Forbidden().json(ErrorResponse {
-                    success: false,
-                    error: "Access denied to this inventory".to_string(),
-                    message: None,
-                }))
-            },
-            Err(e) => {
-                error!("Error checking inventory access: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: "An internal error occurred".to_string(),
-                    message: None,
-                }));
-            },
-            _ => {},
-        }
-    }
-
-    match db_service
-        .get_inventory_statistics(request.inventory_id, auth.user_id)
-        .await
-    {
+    match db_service.report_statistics(&scope).await {
         Ok(stats) => {
             info!("Retrieved statistics for user {}", auth.username);
             Ok(HttpResponse::Ok().json(ApiResponse {
@@ -2014,17 +1909,11 @@ pub async fn get_inventory_statistics_endpoint(
                 error: None,
             }))
         },
-        Err(e) => {
-            error!("Error retrieving statistics: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "Failed to retrieve statistics".to_string(),
-                message: Some(e.to_string()),
-            }))
-        },
+        Err(e) => Ok(report_server_error("retrieve statistics", &e)),
     }
 }
 
+/// The breakdown for the items a report would list (same parameters as `/reports/inventory`).
 #[get("/reports/inventory/categories")]
 pub async fn get_category_breakdown_endpoint(
     pool: web::Data<Pool>,
@@ -2035,39 +1924,13 @@ pub async fn get_category_breakdown_endpoint(
         Ok(a) => a,
         Err(e) => return Ok(e),
     };
-
     let db_service = DatabaseService::new(pool.get_ref().clone());
-    let request = query.into_inner();
+    let scope = match prepare_report(&db_service, &auth, query.into_inner()).await {
+        Ok(scope) => scope,
+        Err(response) => return Ok(response),
+    };
 
-    // Check inventory access if specific inventory requested
-    if let Some(inv_id) = request.inventory_id {
-        match db_service
-            .check_inventory_access(auth.user_id, inv_id)
-            .await
-        {
-            Ok(false) => {
-                return Ok(HttpResponse::Forbidden().json(ErrorResponse {
-                    success: false,
-                    error: "Access denied to this inventory".to_string(),
-                    message: None,
-                }))
-            },
-            Err(e) => {
-                error!("Error checking inventory access: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                    success: false,
-                    error: "An internal error occurred".to_string(),
-                    message: None,
-                }));
-            },
-            _ => {},
-        }
-    }
-
-    match db_service
-        .get_category_breakdown(request.inventory_id, auth.user_id)
-        .await
-    {
+    match db_service.report_breakdown(&scope).await {
         Ok(breakdown) => {
             info!("Retrieved category breakdown for user {}", auth.username);
             Ok(HttpResponse::Ok().json(ApiResponse {
@@ -2077,14 +1940,7 @@ pub async fn get_category_breakdown_endpoint(
                 error: None,
             }))
         },
-        Err(e) => {
-            error!("Error retrieving category breakdown: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "Failed to retrieve category breakdown".to_string(),
-                message: Some(e.to_string()),
-            }))
-        },
+        Err(e) => Ok(report_server_error("retrieve the category breakdown", &e)),
     }
 }
 

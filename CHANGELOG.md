@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Organizer-aware reports (FEAT-F2, BUGS-BUG9).** The report page groups its breakdown by any
+  select organizer of the inventory (the first one by default) instead of the legacy category
+  column that nothing writes any more, and can filter by organizer, one dropdown per select
+  organizer with "Any", each option, or "No value". The statistics, the breakdown, the item list
+  and the CSV all describe the same filtered set of items. The items table and the CSV get one
+  column per select or text organizer. API: `group_by=<organizer id>` and
+  `organizers=<type>:<option>[,...]` (an option id or `none`; OR within one organizer, AND across
+  organizers; at most 50 pairs, strictly parsed) on `GET /api/reports/inventory`, `.../statistics`
+  and `.../categories`; the report gains `group_by` and per-item `organizer_values`, and breakdown
+  rows gain `organizer_option_id`.
 - **Registration mode, invitation links and password-reset links (BUGS-SEC12).** Administrators
   choose who may register (open, invite only or closed) under Settings → User Management. They
   create single-use invitation links (7 days by default, 1 hour to 30 days) and password-reset
@@ -24,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `audit`) record the acting user and the objects, never a token.
 
 ### Fixed
+- **Reports filtered by a date no longer fail.** `from_date` and `to_date` were sent to the
+  database as text for a `date` comparison, which the driver refuses, so any report with a date
+  filter answered `500`. The statistics and category endpoints now validate their parameters like
+  the report does (an invalid date used to reach the database), and the report endpoints no
+  longer put raw database error text in their responses.
+- **The report's "Average Price" card showed nothing useful** (the page read `average_price`, the
+  API sends `average_item_value`). The average is over the items that have a price.
+- **Report statistics and breakdown ignored the filters.** They covered the whole inventory next
+  to a filtered item list. A missing quantity now counts as 1 everywhere (it did on the item page
+  but not in the report totals), and a legacy category that is empty and one that is missing are
+  one group.
 - **Dates no longer show one day early west of UTC, and the warranty countdown is no longer off
   by one.** Purchase dates and warranty expiry dates are calendar days (`YYYY-MM-DD`), but the
   browser read them as UTC midnight, which is the previous evening in the Americas. They are now
@@ -54,6 +75,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy's access log to see probes.
 
 ### Changed
+- **Breaking: the CSV export's "Category" and "Location" columns are replaced by one column per
+  select or text organizer** (named after the organizer, so an inventory with a "Category"
+  organizer still has a "Category" column, now filled in). The old columns read the legacy
+  `items.category` / `items.location` text, which nothing in the web interface writes. If any
+  exported item still holds a legacy value, "Legacy category" / "Legacy location" columns are
+  added so nothing is dropped. A missing quantity is exported as 1.
+- **CSV export: text that starts with `=`, `+`, `-`, `@`, a tab, a carriage return or a line feed
+  (or the full-width forms of `=`, `+`, `-`, `@`) gets a leading `'`** so a spreadsheet does not
+  run it as a formula. This applies to names, descriptions, inventory names, organizer names and
+  values, and legacy values; numbers and dates are untouched. The quote is common practice
+  (CWE-1236), and a spreadsheet that saves the file again can undo it.
+- **Deprecated: the breakdown by legacy category.** `GET /api/reports/inventory` without
+  `group_by` still groups by the legacy `items.category` column (now filtered, with empty and
+  missing categories merged), for API clients. It is removed together with the legacy columns
+  (plan item L-38); send `group_by` to group by an organizer.
 - **Breaking: registration is invite-only by default (migration V028).** `POST /api/auth/register`
   used to create an account for anyone. Every install, new or upgraded, now starts as invite
   only, and the request needs an `invite_token` from an administrator's invitation link. An

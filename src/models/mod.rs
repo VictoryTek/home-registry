@@ -158,6 +158,15 @@ pub struct InventoryReportRequest {
     pub sort_order: Option<String>, // "asc", "desc"
     #[validate(length(max = 10, message = "Format must be under 10 characters"))]
     pub format: Option<String>, // "json", "csv"
+    /// Group the breakdown by this select organizer of the requested inventory. Without it the
+    /// breakdown is by the legacy `items.category` column (deprecated: removed together with
+    /// the legacy columns, ARCH-H2).
+    pub group_by: Option<i32>,
+    /// Organizer filters, `type:option[,type:option...]`, where option is an id or `none`
+    /// (no value). Several options of one organizer match any of them; different organizers
+    /// must all match. Needs `inventory_id`.
+    #[validate(length(max = 1000, message = "Organizer filter is too long"))]
+    pub organizers: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -174,34 +183,38 @@ pub struct InventoryStatistics {
 
 #[derive(Serialize, Debug)]
 pub struct CategoryBreakdown {
+    /// The group's name: an organizer option, "No value", or a legacy category
     pub category: String,
+    /// The organizer option behind the group; null for "No value" and for legacy categories
+    pub organizer_option_id: Option<i32>,
     pub item_count: i64,
     pub total_quantity: i64,
     pub total_value: f64,
     pub percentage_of_total: f64,
 }
 
-#[derive(Serialize, Debug)]
-pub struct ItemExportRow {
-    pub id: i32,
-    pub inventory_name: String,
-    pub item_name: String,
-    pub description: String,
-    pub category: String,
-    pub location: String,
-    pub quantity: i32,
-    pub purchase_price: String,
-    pub total_value: String,
-    pub purchase_date: String,
-    pub warranty_expiry: String,
-    pub created_at: String,
+/// The organizer a report is grouped by
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportGrouping {
+    pub organizer_type_id: i32,
+    pub name: String,
+}
+
+/// An item in a report, with the values of its select and text organizers by organizer id
+#[derive(Serialize, Debug, Clone)]
+pub struct ReportItem {
+    #[serde(flatten)]
+    pub item: Item,
+    pub organizer_values: std::collections::BTreeMap<i32, String>,
 }
 
 #[derive(Serialize, Debug)]
 pub struct InventoryReportData {
     pub statistics: InventoryStatistics,
     pub category_breakdown: Vec<CategoryBreakdown>,
-    pub items: Vec<Item>,
+    /// The organizer the breakdown is grouped by; null for the legacy category breakdown
+    pub group_by: Option<ReportGrouping>,
+    pub items: Vec<ReportItem>,
     pub generated_at: DateTime<Utc>,
     pub filters_applied: InventoryReportRequest,
 }

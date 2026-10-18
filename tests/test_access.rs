@@ -279,19 +279,20 @@ async fn every_access_path_agrees_for_every_relationship() {
         // 4. Report scoping returns items from exactly the same inventories
         let request: InventoryReportRequest =
             serde_json::from_value(serde_json::json!({})).expect("empty report request");
+        let scope = f.db.resolve_report_scope(request, uid).await.unwrap();
         let reported: BTreeSet<i32> =
-            f.db.get_inventory_report_data(request, uid)
+            f.db.report_items(&scope)
                 .await
                 .unwrap()
                 .iter()
-                .map(|item| item.inventory_id)
+                .map(|report_item| report_item.item.inventory_id)
                 .filter(|id| all_inventories.contains(id))
                 .collect();
         assert_eq!(reported, expected_ids, "{label}: report inventories");
 
         // 5. Statistics and category breakdown count the same items (one per inventory here)
-        let stats = f.db.get_inventory_statistics(None, uid).await.unwrap();
-        let breakdown = f.db.get_category_breakdown(None, uid).await.unwrap();
+        let stats = f.db.report_statistics(&scope).await.unwrap();
+        let breakdown = f.db.report_breakdown(&scope).await.unwrap();
         let breakdown_items: i64 = breakdown.iter().map(|c| c.item_count).sum();
         assert_eq!(
             stats.total_items,

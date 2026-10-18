@@ -455,27 +455,53 @@ export interface InventoryReportParams {
   to_date?: string;
   min_price?: number;
   max_price?: number;
+  /** Legacy `items.category` filter, kept for API clients; the report page uses `organizers` */
   category?: string;
   format?: string;
+  /** Group the breakdown by this select organizer of the inventory */
+  group_by?: number;
+  /** Organizer filters, `type:option[,type:option...]`, option an id or `none` */
+  organizers?: string;
 }
 
 export interface InventoryStatistics {
   total_items: number;
   total_value: number;
+  total_quantity: number;
+  /** The number of groups in the breakdown */
   category_count: number;
-  average_price: number;
+  /** Average price over the items that have a price */
+  average_item_value: number;
 }
 
 export interface CategorySummary {
+  /** The group's name: an organizer option, "No value", or a legacy category */
   category: string;
+  /** The organizer option behind the group; null for "No value" and legacy categories */
+  organizer_option_id?: number | null;
   item_count: number;
+  total_quantity: number;
   total_value: number;
+  /** Exact share of the total value, 0 to 100 */
+  percentage_of_total: number;
+}
+
+export interface ReportGrouping {
+  organizer_type_id: number;
+  name: string;
+}
+
+/** An item in a report, with its select and text organizer values by organizer id */
+export interface ReportItem extends Item {
+  organizer_values?: Record<string, string>;
 }
 
 export interface InventoryReportData {
   statistics: InventoryStatistics;
   category_breakdown: CategorySummary[];
-  items: Item[];
+  /** The organizer the breakdown is grouped by; null for the legacy category breakdown */
+  group_by?: ReportGrouping | null;
+  items: ReportItem[];
   generated_at: string;
   filters_applied: InventoryReportParams;
 }

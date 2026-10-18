@@ -1,43 +1,105 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Header, LoadingState, EmptyState } from '@/components';
-import { reportApi, inventoryApi } from '@/services/api';
+import { reportApi, inventoryApi, organizerApi } from '@/services/api';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatDateOnly, todayAsDateOnly, type DateFormatType } from '@/utils/dateFormat';
 import { formatCurrency, type CurrencyType } from '@/utils/currencyFormat';
-import type { InventoryReportData, InventoryReportParams, Inventory, Item } from '@/types';
+import {
+  defaultGroupBy,
+  encodeOrganizerFilters,
+  roundShares,
+  type OrganizerSelection,
+} from '@/utils/reportQuery';
+import type {
+  InventoryReportData,
+  InventoryReportParams,
+  Inventory,
+  OrganizerTypeWithOptions,
+  ReportItem,
+} from '@/types';
+
+/** The filters a report was asked for: the form's values at the time of "Apply Filters". */
+interface AppliedFilters {
+  filters: InventoryReportParams;
+  selection: OrganizerSelection;
+}
 
 export function InventoryReportPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { showToast } = useApp();
   const { settings } = useAuth();
+  const inventoryId = id ? parseInt(id, 10) : undefined;
   const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
   const [inventory, setInventory] = useState<Inventory | null>(null);
+  const [organizers, setOrganizers] = useState<OrganizerTypeWithOptions[] | null>(null);
   const [reportData, setReportData] = useState<InventoryReportData | null>(null);
-  const [filters, setFilters] = useState<InventoryReportParams>({
-    inventory_id: id ? parseInt(id, 10) : undefined,
-    from_date: undefined,
-    to_date: undefined,
-    min_price: undefined,
-    max_price: undefined,
-    category: undefined,
-  });
+  // What the form shows, and what the report was last asked for
+  const noFilters: InventoryReportParams = { inventory_id: inventoryId };
+  const [filters, setFilters] = useState<InventoryReportParams>(noFilters);
+  const [selection, setSelection] = useState<OrganizerSelection>({});
+  const [applied, setApplied] = useState<AppliedFilters>({ filters: noFilters, selection: {} });
+  const [groupBy, setGroupBy] = useState<number | undefined>(undefined);
   const [showFilters, setShowFilters] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const latestRequest = useRef(0);
+
+  // The inventory's organizers decide how the report can be grouped and filtered
+  useEffect(() => {
+    if (inventoryId === undefined) {
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      let list: OrganizerTypeWithOptions[] = [];
+      try {
+        const result = await organizerApi.getByInventory(inventoryId);
+        if (result.success && result.data) {
+          list = result.data;
+        }
+      } catch {
+        // The report still works without organizers
+      }
+      if (!cancelled) {
+        setOrganizers(list);
+        setGroupBy(defaultGroupBy(list));
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [inventoryId]);
+
+  const reportParams = useMemo(
+    (): InventoryReportParams => ({
+      ...applied.filters,
+      group_by: groupBy,
+      organizers: encodeOrganizerFilters(applied.selection),
+    }),
+    [applied, groupBy]
+  );
 
   const loadReport = useCallback(async () => {
-    if (!id) {
+    if (!id || organizers === null) {
       return;
     }
 
-    setLoading(true);
+    // Answers that arrive after a newer request was sent are dropped
+    latestRequest.current += 1;
+    const request = latestRequest.current;
+    setUpdating(true);
     try {
       const [inventoryResult, reportResult] = await Promise.all([
         inventoryApi.getById(parseInt(id, 10)),
-        reportApi.getInventoryReport(filters),
+        reportApi.getInventoryReport(reportParams),
       ]);
+      if (request !== latestRequest.current) {
+        return;
+      }
 
       if (inventoryResult.success && inventoryResult.data) {
         setInventory(inventoryResult.data);
@@ -53,11 +115,16 @@ export function InventoryReportPage() {
         showToast(reportResult.error ?? 'Failed to load report', 'error');
       }
     } catch {
-      showToast('Failed to load report', 'error');
+      if (request === latestRequest.current) {
+        showToast('Failed to load report', 'error');
+      }
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) {
+        setLoading(false);
+        setUpdating(false);
+      }
     }
-  }, [id, filters, navigate, showToast]);
+  }, [id, organizers, reportParams, navigate, showToast]);
 
   useEffect(() => {
     void loadReport();
@@ -73,25 +140,27 @@ export function InventoryReportPage() {
     }));
   };
 
+  const handleOrganizerChange = (organizerId: number, value: string) => {
+    setSelection((prev) => ({
+      ...prev,
+      [organizerId]: value === '' ? undefined : value === 'none' ? 'none' : Number(value),
+    }));
+  };
+
   const handleApplyFilters = () => {
-    void loadReport();
+    setApplied({ filters: { ...filters }, selection: { ...selection } });
   };
 
   const handleClearFilters = () => {
-    setFilters({
-      inventory_id: id ? parseInt(id, 10) : undefined,
-      from_date: undefined,
-      to_date: undefined,
-      min_price: undefined,
-      max_price: undefined,
-      category: undefined,
-    });
+    setFilters(noFilters);
+    setSelection({});
+    setApplied({ filters: noFilters, selection: {} });
   };
 
   const handleDownloadCSV = async () => {
     setDownloading(true);
     try {
-      const blob = await reportApi.downloadReportCSV(filters);
+      const blob = await reportApi.downloadReportCSV(reportParams);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -126,30 +195,40 @@ export function InventoryReportPage() {
     );
   }
 
-  const { statistics, category_breakdown, items } = reportData;
+  const { statistics, category_breakdown, items, group_by: grouping } = reportData;
   const dateFormat = (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType;
   const currencyFormat = (settings?.currency ?? 'USD') as CurrencyType;
 
-  // Get unique categories for filter dropdown
-  const uniqueCategories = Array.from(
-    new Set(
-      items.map((item) => item.category).filter((c): c is string => c !== undefined && c !== '')
-    )
-  ).sort();
+  // Organizers by display order: select organizers can group and filter; select and text
+  // organizers get a column in the items table (image values are file paths, not for a report)
+  const ordered = [...(organizers ?? [])].sort(
+    (a, b) => a.display_order - b.display_order || (a.id ?? 0) - (b.id ?? 0)
+  );
+  const selectOrganizers = ordered.filter((o) => o.input_type === 'select');
+  const columnOrganizers = ordered.filter((o) => o.input_type !== 'image');
+
+  // Values that only the old category/location columns still hold (no organizer carries them)
+  const showLegacyCategory = items.some((item) => item.category);
+  const showLegacyLocation = items.some((item) => item.location);
+
+  // The legacy breakdown (no organizer chosen) says nothing when it is all "Uncategorized"
+  const breakdownIsEmpty =
+    !grouping && category_breakdown.every((group) => group.category === 'Uncategorized');
+  const shares = roundShares(category_breakdown.map((group) => group.percentage_of_total));
 
   // Check if any filters are active
   const hasActiveFilters =
-    filters.from_date !== undefined ||
-    filters.to_date !== undefined ||
-    filters.min_price !== undefined ||
-    filters.max_price !== undefined ||
-    filters.category !== undefined;
+    applied.filters.from_date !== undefined ||
+    applied.filters.to_date !== undefined ||
+    applied.filters.min_price !== undefined ||
+    applied.filters.max_price !== undefined ||
+    encodeOrganizerFilters(applied.selection) !== undefined;
 
   return (
     <>
       <Header
         title={`${inventory.name} Report`}
-        subtitle="View detailed inventory statistics and export data"
+        subtitle={updating ? 'Updating...' : 'View detailed inventory statistics and export data'}
         icon="fas fa-chart-bar"
       />
 
@@ -276,27 +355,34 @@ export function InventoryReportPage() {
                     }
                   />
                 </div>
-                <div>
-                  <label
-                    htmlFor="category"
-                    style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}
-                  >
-                    Category
-                  </label>
-                  <select
-                    id="category"
-                    className="input"
-                    value={filters.category ?? ''}
-                    onChange={(e) => handleFilterChange('category', e.target.value)}
-                  >
-                    <option value="">All Categories</option>
-                    {uniqueCategories.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                {selectOrganizers.map((organizer) => (
+                  <div key={organizer.id}>
+                    <label
+                      htmlFor={`organizer-${String(organizer.id)}`}
+                      style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 500 }}
+                    >
+                      {organizer.name}
+                    </label>
+                    <select
+                      id={`organizer-${String(organizer.id)}`}
+                      className="input"
+                      value={String(selection[organizer.id ?? 0] ?? '')}
+                      onChange={(e) => handleOrganizerChange(organizer.id ?? 0, e.target.value)}
+                    >
+                      <option value="">Any</option>
+                      {[...organizer.options]
+                        .sort(
+                          (a, b) => a.display_order - b.display_order || (a.id ?? 0) - (b.id ?? 0)
+                        )
+                        .map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.name}
+                          </option>
+                        ))}
+                      <option value="none">No value</option>
+                    </select>
+                  </div>
+                ))}
               </div>
               <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem' }}>
                 <button className="btn btn-primary" onClick={handleApplyFilters}>
@@ -348,7 +434,9 @@ export function InventoryReportPage() {
                 <i className="fas fa-chart-pie"></i>
               </div>
               <div className="stat-content">
-                <div className="stat-label">Categories</div>
+                <div className="stat-label">
+                  {grouping ? `${grouping.name} groups` : 'Categories'}
+                </div>
                 <div className="stat-value">{statistics.category_count}</div>
               </div>
             </div>
@@ -358,53 +446,107 @@ export function InventoryReportPage() {
               </div>
               <div className="stat-content">
                 <div className="stat-label">Average Price</div>
+                <div
+                  className="stat-hint no-print"
+                  style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}
+                >
+                  items with a price
+                </div>
                 <div className="stat-value">
-                  {formatCurrency(statistics.average_price, currencyFormat)}
+                  {formatCurrency(statistics.average_item_value, currencyFormat)}
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Category Breakdown */}
-          {category_breakdown.length > 0 && (
+          {/* Breakdown */}
+          <div
+            style={{
+              marginBottom: '1.5rem',
+              padding: '1rem',
+              background: 'var(--card-bg)',
+              borderRadius: '8px',
+            }}
+          >
             <div
               style={{
-                marginBottom: '1.5rem',
-                padding: '1rem',
-                background: 'var(--card-bg)',
-                borderRadius: '8px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '1rem',
+                flexWrap: 'wrap',
+                marginBottom: '1rem',
               }}
             >
-              <h3 style={{ marginBottom: '1rem' }}>
+              <h3 style={{ margin: 0 }}>
                 <i className="fas fa-chart-pie"></i>
-                Category Breakdown
+                {grouping ? `Breakdown by ${grouping.name}` : 'Category Breakdown (legacy)'}
               </h3>
+              {selectOrganizers.length > 0 && (
+                <div
+                  className="no-print"
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                >
+                  <label htmlFor="group_by" style={{ fontWeight: 500 }}>
+                    Group by
+                  </label>
+                  <select
+                    id="group_by"
+                    className="input"
+                    value={String(groupBy ?? '')}
+                    onChange={(e) =>
+                      setGroupBy(e.target.value === '' ? undefined : Number(e.target.value))
+                    }
+                  >
+                    {selectOrganizers.map((organizer) => (
+                      <option key={organizer.id} value={organizer.id}>
+                        {organizer.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {breakdownIsEmpty ? (
+              <p style={{ color: 'var(--text-muted)' }}>
+                {selectOrganizers.length === 0
+                  ? 'Add a select organizer (for example "Category") to this inventory to see a breakdown of its items.'
+                  : 'Choose an organizer to group by.'}
+              </p>
+            ) : category_breakdown.length === 0 ? (
+              <p style={{ color: 'var(--text-muted)' }}>No items match the current filters.</p>
+            ) : (
               <div className="table-container">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Category</th>
+                      <th>{grouping ? grouping.name : 'Category'}</th>
                       <th style={{ textAlign: 'right' }}>Items</th>
+                      <th style={{ textAlign: 'right' }}>Quantity</th>
                       <th style={{ textAlign: 'right' }}>Total Value</th>
+                      <th style={{ textAlign: 'right' }}>Share</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {category_breakdown.map((cat) => (
-                      <tr key={cat.category}>
+                    {category_breakdown.map((group, index) => (
+                      <tr key={group.organizer_option_id ?? `group-${group.category}`}>
                         <td>
-                          <strong>{cat.category || 'Uncategorized'}</strong>
+                          <strong>{group.category}</strong>
                         </td>
-                        <td style={{ textAlign: 'right' }}>{cat.item_count}</td>
+                        <td style={{ textAlign: 'right' }}>{group.item_count}</td>
+                        <td style={{ textAlign: 'right' }}>{group.total_quantity}</td>
                         <td style={{ textAlign: 'right' }}>
-                          {formatCurrency(cat.total_value, currencyFormat)}
+                          {formatCurrency(group.total_value, currencyFormat)}
                         </td>
+                        <td style={{ textAlign: 'right' }}>{(shares[index] ?? 0).toFixed(1)}%</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Items Table */}
           <div style={{ padding: '1rem', background: 'var(--card-bg)', borderRadius: '8px' }}>
@@ -424,8 +566,11 @@ export function InventoryReportPage() {
                   <thead>
                     <tr>
                       <th>Name</th>
-                      <th>Category</th>
-                      <th>Location</th>
+                      {columnOrganizers.map((organizer) => (
+                        <th key={organizer.id}>{organizer.name}</th>
+                      ))}
+                      {showLegacyCategory && <th>Legacy category</th>}
+                      {showLegacyLocation && <th>Legacy location</th>}
                       <th style={{ textAlign: 'center' }}>Quantity</th>
                       <th style={{ textAlign: 'right' }}>Price</th>
                       <th style={{ textAlign: 'right' }}>Total Value</th>
@@ -433,7 +578,7 @@ export function InventoryReportPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {items.map((item: Item) => {
+                    {items.map((item: ReportItem) => {
                       const itemValue = (item.purchase_price ?? 0) * (item.quantity ?? 1);
                       return (
                         <tr key={item.id}>
@@ -451,17 +596,23 @@ export function InventoryReportPage() {
                               </div>
                             )}
                           </td>
-                          <td>
-                            {item.category ? (
-                              <span className="item-card-category">{item.category}</span>
-                            ) : (
-                              <span style={{ color: 'var(--text-muted)' }}>-</span>
-                            )}
-                          </td>
-                          <td>{item.location ?? '-'}</td>
+                          {columnOrganizers.map((organizer) => {
+                            const organizerValue = item.organizer_values?.[String(organizer.id)];
+                            return (
+                              <td key={organizer.id}>
+                                {organizerValue ? (
+                                  <span className="item-card-category">{organizerValue}</span>
+                                ) : (
+                                  <span style={{ color: 'var(--text-muted)' }}>-</span>
+                                )}
+                              </td>
+                            );
+                          })}
+                          {showLegacyCategory && <td>{item.category ?? '-'}</td>}
+                          {showLegacyLocation && <td>{item.location ?? '-'}</td>}
                           <td style={{ textAlign: 'center' }}>{item.quantity ?? 1}</td>
                           <td style={{ textAlign: 'right' }}>
-                            {item.purchase_price !== undefined
+                            {typeof item.purchase_price === 'number'
                               ? formatCurrency(item.purchase_price, currencyFormat)
                               : '-'}
                           </td>
@@ -499,8 +650,8 @@ export function InventoryReportPage() {
             </p>
             {hasActiveFilters && (
               <p style={{ marginTop: '0.5rem' }}>
-                <i className="fas fa-info-circle"></i> Filters active: This report shows a filtered
-                subset of items.
+                <i className="fas fa-info-circle"></i> Filters active: the items, the statistics and
+                the breakdown all describe the same filtered subset of items.
               </p>
             )}
           </div>
