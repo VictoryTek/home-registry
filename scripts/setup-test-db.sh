@@ -83,21 +83,23 @@ echo "Applying migrations to test database..."
 
 success_count=0
 fail_count=0
+total_count=0
 for migration in migrations/V*.sql; do
     if [ -f "$migration" ]; then
+        total_count=$((total_count + 1))
         echo "  Applying: $(basename "$migration")"
         
         # Execute migration via docker exec
         if docker exec -i "$CONTAINER_NAME" psql -U "$POSTGRES_USER" -d "$TEST_DB_NAME" -v ON_ERROR_STOP=0 < "$migration" &>/dev/null; then
-            ((success_count++))
+            success_count=$((success_count + 1))
         else
-            ((fail_count++))
+            fail_count=$((fail_count + 1))
             echo "  ⚠️  Migration $(basename "$migration") encountered issues (may already be applied)"
         fi
     fi
 done
 
-echo "✓ Applied $success_count/${#migration[@]} migrations successfully"
+echo "✓ Applied $success_count/$total_count migrations successfully"
 if [ $fail_count -gt 0 ]; then
     echo "ℹ️  $fail_count migrations had warnings (this is normal for idempotent migrations)"
 fi

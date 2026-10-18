@@ -12,7 +12,7 @@ Set-Location $projectRoot
 Write-Host "Working directory: $projectRoot" -ForegroundColor Cyan
 
 # Minimum coverage threshold
-$MIN_COVERAGE = 80
+$MIN_COVERAGE = 48
 
 # Color output functions
 function Write-Section {

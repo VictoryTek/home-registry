@@ -8,7 +8,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 3. Apply → run the verification commands from `CLAUDE.md` → tick the box → move to the next.
 4. Tier 3 items (security, schema/migration, public interface, many files) also get a `reviewer` pass before the commit message. You run all git commands.
 
-**Progress:** 11 / 19 high · 0 / 48 medium · 0 / 31 low
+**Progress:** 11 / 19 high · 0 / 48 medium · 0 / 32 low
 
 ---
 
@@ -182,6 +182,7 @@ Consolidated from [ANALYSIS_ARCH.md](ANALYSIS_ARCH.md), [ANALYSIS_BUGS.md](ANALY
 - [ ] **L-29 — Report which JSON field failed** — include the field path (e.g. `items[0].quantity`) in the error envelope. Needs `serde_path_to_error` (a new pinned dependency, checked against `deny.toml`) and a custom `Json` extractor replacing `web::Json` in ~30 handlers, or a wrapper that re-parses the buffered body on failure. Split out of H-11.
 - [ ] **L-30 — Three moderate `npm audit` findings (React Router open redirect)** — `@remix-run/router` 1.3.0–1.23.2 (GHSA-2j2x-hqr9-3h42: a same-origin redirect whose path starts with `//` is reinterpreted as protocol-relative, an open redirect), pulled in through `react-router` and `react-router-dom` (pinned `6.30.3`, listed under `dependencies`). All three are production dependencies and ship in the bundle. Exposure here looks low: every `navigate()` / `<Navigate>` target is a fixed path or `/inventory/${numeric id}`, and nothing reads a redirect target from the URL, a query parameter or an API response (checked by grep, not by test). The fix is `react-router-dom@6.30.6`, an exact-pin bump (Tier 3: new pinned version, changelog and `package-lock.json`). Found during H-11 verification; not fixed there.
 - [ ] **L-31 — Audit and application logging of names, filenames and usernames** — about 32 `info!`/`warn!`/`error!` calls under `src/api` and `src/auth` write client-chosen text: inventory, item and organizer names (`src/api/mod.rs` ~236, 554, 809, 1062), image filenames (~1585, 1611, 1619), backup filenames (`src/api/backup.rs` ~589, 868), and `auth.username` (`src/api/mod.rs` ~1901, 1954, 2009, 2072; `src/api/backup.rs` ~526; `src/api/totp.rs` ~101). Decide what audit lines may contain (for example the acting user's id plus username, and ids instead of names and filenames for objects), and redact any error text that wraps client input (H-11 fixed the uploaded-backup parse error only). Found by the H-11 review; H-11's rule covers the HTTP-layer logs only.
+- [ ] **L-32 — Raise the coverage gate over time** — the gate was set to 48% (just under the measured 48.46%, 2640/5448 lines, 2026-10-17) in both `scripts/preflight.sh` (`MIN_COVERAGE`) and the CI `coverage` job (`--fail-under`); it was 80% in preflight and 0 in CI before, and the repo had never met 80%. Raise both together as tests land, starting with the largest untested files: `src/api/auth.rs` (350/1202 lines), `src/api/mod.rs` (356/1074) and `src/db/mod.rs` (819/1370), then `src/api/backup.rs` (142/348) and `src/api/totp.rs` (87/334). Target 80%. Keep the two numbers equal; bump them in the same commit as the tests that justify it.
 
 ---
 

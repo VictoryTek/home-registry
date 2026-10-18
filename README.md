@@ -29,6 +29,7 @@ The easiest way to try Home Registry is with Docker Compose, which sets up both 
 # Copy the example environment file
 cp .env.example .env
 
+# .env is ignored by Git, so your values stay on your machine
 # Edit .env and set your database password
 # POSTGRES_PASSWORD=your_secure_password
 

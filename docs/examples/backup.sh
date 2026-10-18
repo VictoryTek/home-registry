@@ -288,7 +288,7 @@ if [ -n "${OLD_BACKUPS}" ]; then
             OLD_SIZE=$(du -h "${old_backup}" | cut -f1)
             log_debug "Deleting old backup: ${old_backup} (${OLD_SIZE})"
             rm -f "${old_backup}"
-            ((DELETED_COUNT++))
+            DELETED_COUNT=$((DELETED_COUNT + 1))
         fi
     done <<< "${OLD_BACKUPS}"
     
