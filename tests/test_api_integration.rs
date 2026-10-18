@@ -24,6 +24,7 @@ async fn test_register_and_login_flow() {
     // The register endpoint requires at least one user to exist (initial setup)
     let admin_username = common::test_username("admin_initial");
     common::create_admin_user(&pool, &admin_username).await;
+    common::set_registration_mode(&pool, "open").await;
 
     let app = test::init_service(
         App::new().app_data(web::Data::new(pool.clone())).service(

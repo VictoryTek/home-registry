@@ -12,6 +12,7 @@ import {
   SetupPage,
   LoginPage,
   RegisterPage,
+  ResetPasswordPage,
   RecoveryPage,
   NotificationsPage,
 } from '@/pages';
@@ -102,6 +103,7 @@ function AppContent() {
     location.pathname === '/setup' ||
     location.pathname === '/login' ||
     location.pathname === '/register' ||
+    location.pathname === '/reset' ||
     location.pathname === '/recover'
   ) {
     return (
@@ -140,6 +142,11 @@ function AppContent() {
                 <RegisterPage />
               )
             }
+          />
+          {/* Open to signed-in users too: the link belongs to whoever holds it */}
+          <Route
+            path="/reset"
+            element={needsSetup ? <Navigate to="/setup" replace /> : <ResetPasswordPage />}
           />
           <Route
             path="/recover"

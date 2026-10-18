@@ -3,6 +3,7 @@ import type {
   User,
   UserSettings,
   SetupStatusResponse,
+  RegistrationMode,
   DismissedWarranties,
   LoginTotpRequiredResponse,
 } from '@/types';
@@ -19,6 +20,8 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   needsSetup: boolean | null;
+  /** Who may register; null until the server has answered */
+  registrationMode: RegistrationMode | null;
   totpRequired: LoginTotpRequiredResponse | null;
   login: (
     username: string,
@@ -47,6 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  const [registrationMode, setRegistrationMode] = useState<RegistrationMode | null>(null);
   const [totpRequired, setTotpRequired] = useState<LoginTotpRequiredResponse | null>(null);
 
   // Pick up a replaced token: from this tab (fresh token after a password change or "sign out
@@ -119,6 +123,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const result = await authApi.checkSetupStatus();
       if (result.success && result.data) {
         setNeedsSetup(result.data.needs_setup);
+        setRegistrationMode(result.data.registration_mode);
         return result.data;
       }
     } catch (error) {
@@ -345,6 +350,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         isAuthenticated: !!token && !!user,
         needsSetup,
+        registrationMode,
         totpRequired,
         login,
         completeTotpLogin,

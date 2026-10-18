@@ -1,4 +1,4 @@
-//! Checks that run at startup, before database migrations.
+//! Checks that run at startup: before database migrations, and notices after them.
 
 use std::path::Path;
 
@@ -178,5 +178,34 @@ pub async fn protect_legacy_data_before_migration(
                 backups_dir.display()
             ))
         },
+    }
+}
+
+/// After an upgrade made registration invite-only (migration V028), say so once in the log.
+///
+/// The migration leaves `registration_upgrade_notice = 'show'` when users already existed. This
+/// claims the warning with a second key in one statement, so it is logged by the first start only,
+/// even if several instances start together.
+pub async fn warn_registration_now_invite_only(pool: &Pool) {
+    let Ok(client) = pool.get().await else {
+        return;
+    };
+    let claimed = client
+        .query_opt(
+            "INSERT INTO app_settings (key, value)
+             SELECT 'registration_upgrade_warned', 'yes'
+             WHERE EXISTS (SELECT 1 FROM app_settings
+                           WHERE key = 'registration_upgrade_notice' AND value = 'show')
+             ON CONFLICT (key) DO NOTHING
+             RETURNING key",
+            &[],
+        )
+        .await;
+    if matches!(claimed, Ok(Some(_))) {
+        warn!(
+            "Registration is now invite-only: this server used to let anyone register. Admins can \
+             create invitation links, or choose open, invite or closed registration, under \
+             Settings > User Management."
+        );
     }
 }

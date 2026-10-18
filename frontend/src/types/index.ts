@@ -250,9 +250,34 @@ export interface UserSettings {
   updated_at: string;
 }
 
+export type RegistrationMode = 'open' | 'invite' | 'closed';
+
 export interface SetupStatusResponse {
   needs_setup: boolean;
   user_count: number;
+  /** Who may register, so the sign-in page knows whether to offer it */
+  registration_mode: RegistrationMode;
+}
+
+export interface RegistrationSettings {
+  registration_mode: RegistrationMode;
+  /** An upgrade made registration invite-only and no admin has dismissed the notice yet */
+  upgrade_notice: boolean;
+}
+
+/** A new invitation or reset link. The token is shown once and cannot be fetched again. */
+export interface IssuedToken {
+  id: string;
+  token: string;
+  expires_at: string;
+}
+
+/** An outstanding invitation, without its secret */
+export interface InviteInfo {
+  id: string;
+  created_at: string;
+  expires_at: string;
+  created_by_username?: string | null;
 }
 
 export interface LoginRequest {

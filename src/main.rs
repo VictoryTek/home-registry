@@ -126,6 +126,9 @@ async fn main() -> std::io::Result<()> {
     drop(client);
     log::info!("Migration client returned to pool");
 
+    // If this start applied the upgrade that made registration invite-only, say so (once)
+    home_registry::startup::warn_registration_now_invite_only(&pool).await;
+
     // Rate limiting configuration (RATE_LIMIT_RPS, RATE_LIMIT_BURST, AUTH_RATE_LIMIT_PER_MINUTE,
     // TRUST_PROXY_HEADERS). The limiter state is created once here and shared by all workers.
     let rate_limit_settings = RateLimitSettings::from_env();

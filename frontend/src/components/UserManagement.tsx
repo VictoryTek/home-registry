@@ -3,7 +3,42 @@ import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
 import { authApi } from '@/services/api';
 import { Modal, ConfirmModal } from '@/components';
-import type { User, CreateUserRequest, UpdateUserRequest } from '@/types';
+import { buildInviteLink, buildResetLink } from '@/utils/authLink';
+import type {
+  User,
+  CreateUserRequest,
+  UpdateUserRequest,
+  RegistrationMode,
+  RegistrationSettings,
+  InviteInfo,
+} from '@/types';
+
+const MODE_OPTIONS: { value: RegistrationMode; label: string; description: string }[] = [
+  {
+    value: 'open',
+    label: 'Open',
+    description: 'Anyone who can reach this page can create an account.',
+  },
+  {
+    value: 'invite',
+    label: 'Invite only',
+    description: 'Only people with an invitation link from you can create an account.',
+  },
+  {
+    value: 'closed',
+    label: 'Closed',
+    description:
+      'Nobody can register. You can still add users yourself. Invitations you already made keep their expiry and work again if you switch back to invite only.',
+  },
+];
+
+/** A link to hand over, shown once because the server keeps only a hash of its token. */
+interface IssuedLink {
+  title: string;
+  intro: string;
+  link: string;
+  expiresAt: string;
+}
 
 export function UserManagement() {
   const { showToast } = useApp();
@@ -15,6 +50,9 @@ export function UserManagement() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [deletingUser, setDeletingUser] = useState<User | null>(null);
+  const [registration, setRegistration] = useState<RegistrationSettings | null>(null);
+  const [invites, setInvites] = useState<InviteInfo[]>([]);
+  const [issuedLink, setIssuedLink] = useState<IssuedLink | null>(null);
   const [formData, setFormData] = useState({
     username: '',
     full_name: '',
@@ -42,6 +80,116 @@ export function UserManagement() {
   useEffect(() => {
     void loadUsers();
   }, [loadUsers]);
+
+  const loadRegistration = useCallback(async () => {
+    try {
+      const [settings, list] = await Promise.all([
+        authApi.getRegistrationSettings(),
+        authApi.listInvites(),
+      ]);
+      if (settings.success && settings.data) {
+        setRegistration(settings.data);
+      }
+      if (list.success && list.data) {
+        setInvites(list.data);
+      }
+    } catch {
+      showToast('Failed to load registration settings', 'error');
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    void loadRegistration();
+  }, [loadRegistration]);
+
+  const changeMode = async (mode: RegistrationMode) => {
+    try {
+      const result = await authApi.updateRegistrationSettings({ registration_mode: mode });
+      if (result.success && result.data) {
+        setRegistration(result.data);
+        showToast('Registration setting saved', 'success');
+      } else {
+        showToast(result.error ?? 'Failed to save registration setting', 'error');
+      }
+    } catch {
+      showToast('Failed to save registration setting', 'error');
+    }
+  };
+
+  const dismissNotice = async () => {
+    try {
+      const result = await authApi.updateRegistrationSettings({ dismiss_upgrade_notice: true });
+      if (result.success && result.data) {
+        setRegistration(result.data);
+      }
+    } catch {
+      showToast('Failed to dismiss the notice', 'error');
+    }
+  };
+
+  const createInvite = async () => {
+    try {
+      const result = await authApi.createInvite();
+      if (result.success && result.data) {
+        setIssuedLink({
+          title: 'Invitation Link',
+          intro: 'Send this link to the person you want to invite. It can be used once.',
+          link: buildInviteLink(window.location.origin, result.data.token),
+          expiresAt: result.data.expires_at,
+        });
+        void loadRegistration();
+      } else {
+        showToast(result.error ?? 'Failed to create invitation', 'error');
+      }
+    } catch {
+      showToast('Failed to create invitation', 'error');
+    }
+  };
+
+  const revokeInvite = async (inviteId: string) => {
+    try {
+      const result = await authApi.revokeInvite(inviteId);
+      if (result.success) {
+        showToast('Invitation revoked', 'success');
+        void loadRegistration();
+      } else {
+        showToast(result.error ?? 'Failed to revoke invitation', 'error');
+      }
+    } catch {
+      showToast('Failed to revoke invitation', 'error');
+    }
+  };
+
+  const createResetLink = async (user: User) => {
+    try {
+      const result = await authApi.issueResetLink(user.id);
+      if (result.success && result.data) {
+        setIssuedLink({
+          title: `Password Reset Link for @${user.username}`,
+          intro:
+            'Send this link to the user. When they use it they choose a new password and are signed out on every device. It can be used once, and a newer link replaces this one.',
+          link: buildResetLink(window.location.origin, result.data.token),
+          expiresAt: result.data.expires_at,
+        });
+      } else {
+        showToast(result.error ?? 'Failed to create reset link', 'error');
+      }
+    } catch {
+      showToast('Failed to create reset link', 'error');
+    }
+  };
+
+  const copyIssuedLink = async () => {
+    if (!issuedLink) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(issuedLink.link);
+      showToast('Link copied to clipboard', 'success');
+    } catch {
+      showToast('Could not copy. Select the link and copy it by hand.', 'error');
+    }
+  };
 
   const openCreateModal = () => {
     setFormData({
@@ -114,21 +262,12 @@ export function UserManagement() {
       return;
     }
 
-    if (formData.password && formData.password.length < 8) {
-      showToast('Password must be at least 8 characters', 'error');
-      return;
-    }
-
     try {
       const updateData: UpdateUserRequest = {
         full_name: formData.full_name,
         is_admin: formData.is_admin,
         is_active: formData.is_active,
       };
-
-      if (formData.password) {
-        updateData.password = formData.password;
-      }
 
       const result = await authApi.updateUser(editingUser.id, updateData);
       if (result.success) {
@@ -174,6 +313,86 @@ export function UserManagement() {
 
   return (
     <div>
+      {registration && (
+        <div className="settings-group" style={{ marginBottom: '1.5rem' }}>
+          <h3 style={{ marginBottom: '0.75rem' }}>Registration</h3>
+
+          {registration.upgrade_notice && (
+            <div className="auth-warning" style={{ marginBottom: '1rem' }}>
+              <strong>Registration is now invite-only.</strong> This server used to let anyone
+              register. Choose who may register below, or create invitation links for the people you
+              want to add.{' '}
+              <button className="btn btn-sm btn-ghost" onClick={dismissNotice}>
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {MODE_OPTIONS.map((option) => (
+            <label
+              key={option.value}
+              className="form-checkbox"
+              style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}
+            >
+              <input
+                type="radio"
+                name="registration-mode"
+                checked={registration.registration_mode === option.value}
+                onChange={() => void changeMode(option.value)}
+              />
+              <span>
+                <strong>{option.label}</strong>
+                <span className="form-hint" style={{ display: 'block' }}>
+                  {option.description}
+                </span>
+              </span>
+            </label>
+          ))}
+
+          <div style={{ marginTop: '1rem' }}>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={createInvite}
+              disabled={registration.registration_mode === 'closed'}
+              title={
+                registration.registration_mode === 'closed'
+                  ? 'Invitations cannot be created while registration is closed'
+                  : 'Create an invitation link'
+              }
+            >
+              <i className="fas fa-envelope"></i>
+              Invite Someone
+            </button>
+          </div>
+
+          {invites.length > 0 && (
+            <div style={{ marginTop: '0.75rem' }}>
+              <div className="form-hint">Invitations waiting to be used</div>
+              {invites.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="setting-item"
+                  style={{ alignItems: 'center', justifyContent: 'space-between' }}
+                >
+                  <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                    Created {new Date(invite.created_at).toLocaleDateString()}
+                    {invite.created_by_username ? ` by @${invite.created_by_username}` : ''},
+                    expires {new Date(invite.expires_at).toLocaleDateString()}
+                  </span>
+                  <button
+                    className="btn btn-sm btn-ghost btn-danger"
+                    onClick={() => void revokeInvite(invite.id)}
+                    title="Revoke this invitation"
+                  >
+                    <i className="fas fa-ban"></i> Revoke
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ marginBottom: '1rem' }}>
         <button className="btn btn-primary btn-sm" onClick={openCreateModal}>
           <i className="fas fa-plus"></i>
@@ -220,6 +439,13 @@ export function UserManagement() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => void createResetLink(user)}
+                title="Create a password reset link"
+              >
+                <i className="fas fa-key"></i>
+              </button>
               <button
                 className="btn btn-sm btn-ghost"
                 onClick={() => openEditModal(user)}
@@ -374,17 +600,10 @@ export function UserManagement() {
         </div>
 
         <div className="form-group">
-          <label className="form-label" htmlFor="edit-password">
-            New Password
-          </label>
-          <input
-            type="password"
-            className="form-input"
-            id="edit-password"
-            value={formData.password}
-            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-            placeholder="Leave blank to keep current password"
-          />
+          <p className="form-hint">
+            To change this user&apos;s password, close this window and use the key button next to
+            them to create a reset link.
+          </p>
         </div>
 
         <div className="form-group">
@@ -419,6 +638,43 @@ export function UserManagement() {
               You cannot deactivate your own account
             </p>
           )}
+        </div>
+      </Modal>
+
+      {/* Link to hand over; shown once */}
+      <Modal
+        isOpen={issuedLink !== null}
+        onClose={() => setIssuedLink(null)}
+        title={issuedLink?.title ?? ''}
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => void copyIssuedLink()}>
+              <i className="fas fa-copy"></i>
+              Copy Link
+            </button>
+            <button className="btn btn-primary" onClick={() => setIssuedLink(null)}>
+              Done
+            </button>
+          </>
+        }
+      >
+        <p className="form-hint">{issuedLink?.intro}</p>
+        <div className="form-group">
+          <input
+            type="text"
+            className="form-input"
+            readOnly
+            value={issuedLink?.link ?? ''}
+            onFocus={(e) => e.target.select()}
+            aria-label="Link"
+          />
+        </div>
+        <p className="form-hint">
+          Expires {issuedLink ? new Date(issuedLink.expiresAt).toLocaleString() : ''}.
+        </p>
+        <div className="auth-warning">
+          <strong>Copy it now.</strong> The server keeps only a fingerprint of the link, so it
+          cannot be shown again. If it is lost, create a new one.
         </div>
       </Modal>
 

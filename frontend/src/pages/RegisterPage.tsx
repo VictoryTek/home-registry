@@ -1,12 +1,20 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { authApi } from '@/services/api';
 import { useApp } from '@/context/AppContext';
+import { clearUrlFragment, readFragmentToken } from '@/utils/authLink';
 import '@/styles/auth.css';
+
+/** Whether this visitor may fill in the form: decided by the registration mode and invitation. */
+type Access = 'checking' | 'allowed' | 'invite-needed' | 'closed';
 
 export function RegisterPage() {
   const navigate = useNavigate();
   const { showToast } = useApp();
+  // The invitation is in the URL fragment, so it never reaches a server log. It is read once,
+  // before it is removed from the address bar.
+  const [inviteToken] = useState(() => readFragmentToken(window.location.hash, 'invite'));
+  const [access, setAccess] = useState<Access>('checking');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
@@ -22,6 +30,44 @@ export function RegisterPage() {
     password: '',
     confirmPassword: '',
   });
+
+  useEffect(() => {
+    clearUrlFragment();
+    let cancelled = false;
+
+    const decide = async (): Promise<Access> => {
+      const status = await authApi.checkSetupStatus();
+      const mode = status.data?.registration_mode;
+      if (mode === 'open') {
+        return 'allowed';
+      }
+      if (mode === 'closed') {
+        return 'closed';
+      }
+      if (inviteToken === null) {
+        return 'invite-needed';
+      }
+      const check = await authApi.checkInvite(inviteToken);
+      return check.data?.valid === true ? 'allowed' : 'invite-needed';
+    };
+
+    decide()
+      .then((result) => {
+        if (!cancelled) {
+          setAccess(result);
+        }
+      })
+      .catch(() => {
+        // Could not ask; let the visitor try, the server decides
+        if (!cancelled) {
+          setAccess('allowed');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteToken]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -72,6 +118,7 @@ export function RegisterPage() {
         username: formData.username,
         full_name: formData.full_name,
         password: formData.password,
+        invite_token: inviteToken ?? undefined,
       });
 
       if (result.success && result.data) {
@@ -186,7 +233,26 @@ export function RegisterPage() {
             </div>
           )}
 
-          {!showRecoveryCodes ? (
+          {access !== 'allowed' && !showRecoveryCodes ? (
+            <>
+              <div className="auth-step">
+                <p className="step-description">
+                  {access === 'checking' && 'Checking your invitation...'}
+                  {access === 'closed' &&
+                    'Registration is closed. Ask an administrator to create an account for you.'}
+                  {access === 'invite-needed' &&
+                    'Registration is by invitation only. Ask an administrator for an invitation link, then open it. If you reloaded this page, open the link again.'}
+                </p>
+              </div>
+              <div className="auth-footer">
+                <p>
+                  <Link to="/login" className="auth-link">
+                    Back to sign in
+                  </Link>
+                </p>
+              </div>
+            </>
+          ) : !showRecoveryCodes ? (
             <>
               <form onSubmit={handleSubmit} className="auth-form">
                 <div className="form-row">

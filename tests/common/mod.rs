@@ -285,6 +285,24 @@ pub async fn get_test_token(pool: &Pool, username: &str) -> String {
     generate_token(&user).expect("Failed to create token")
 }
 
+/// Set how `POST /api/auth/register` behaves (`open`, `invite` or `closed`). New installs and
+/// upgrades both default to `invite`, so tests that register users without an invitation open it
+/// first. Changing the shared test database's mode affects every test that uses it, so tests of the
+/// other modes use their own scratch database.
+#[allow(dead_code)]
+pub async fn set_registration_mode(pool: &Pool, mode: &str) {
+    pool.get()
+        .await
+        .expect("connection")
+        .execute(
+            "INSERT INTO app_settings (key, value) VALUES ('registration_mode', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            &[&mode],
+        )
+        .await
+        .expect("set registration mode");
+}
+
 /// Create an admin test user and return their credentials
 #[allow(dead_code)]
 pub async fn create_admin_user(pool: &Pool, username: &str) -> (String, String) {

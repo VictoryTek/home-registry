@@ -166,6 +166,7 @@ async fn test_user_registration_valid() {
     // Create initial admin user (required for registration endpoint)
     let admin_username = common::test_username("admin_init");
     common::create_admin_user(&pool, &admin_username).await;
+    common::set_registration_mode(&pool, "open").await;
 
     let app = test::init_service(
         App::new()
@@ -206,6 +207,7 @@ async fn test_user_registration_duplicate_username() {
     // Create initial admin user (required for registration endpoint)
     let admin_username = common::test_username("admin_init");
     common::create_admin_user(&pool, &admin_username).await;
+    common::set_registration_mode(&pool, "open").await;
 
     let app = test::init_service(
         App::new()
@@ -249,6 +251,7 @@ async fn test_user_registration_weak_password() {
     // Create initial admin user (required for registration endpoint)
     let admin_username = common::test_username("admin_init");
     common::create_admin_user(&pool, &admin_username).await;
+    common::set_registration_mode(&pool, "open").await;
 
     let app = test::init_service(
         App::new()

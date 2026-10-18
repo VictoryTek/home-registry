@@ -1,4 +1,7 @@
 pub mod backup;
+mod registration;
+
+pub use registration::{InviteRegistration, PasswordReset};
 
 use crate::models::{
     AdminUpdateUserRequest,

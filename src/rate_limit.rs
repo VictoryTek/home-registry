@@ -29,9 +29,11 @@ const MINUTE: Duration = Duration::from_secs(60);
 const PROXY_WARN_EVERY_SECS: i64 = 600;
 
 /// Unauthenticated endpoints that run password hashing or verify credentials.
-const AUTH_LIMITED_PATHS: [&str; 6] = [
+const AUTH_LIMITED_PATHS: [&str; 8] = [
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/invite/check",
+    "/api/auth/reset-password",
     "/api/auth/setup",
     "/api/auth/recovery-codes/use",
     "/api/auth/totp/verify",
@@ -423,6 +425,8 @@ mod tests {
         for p in [
             "/api/auth/login",
             "/api/auth/register",
+            "/api/auth/invite/check",
+            "/api/auth/reset-password",
             "/api/auth/setup",
             "/api/auth/recovery-codes/use",
             "/api/auth/totp/verify",

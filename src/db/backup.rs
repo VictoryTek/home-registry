@@ -524,6 +524,27 @@ impl DatabaseService {
         .await?;
         report.sessions_ended = true;
 
+        // A backup must never make an invitation or reset link redeemable again. Whatever the file
+        // holds as unused may have been used or revoked since it was taken, so all of it is revoked.
+        // (A database still at an older schema has no such table; restore skips what is not there.)
+        let has_tokens: bool = tx
+            .query_one("SELECT to_regclass('public.auth_tokens') IS NOT NULL", &[])
+            .await?
+            .get(0);
+        let revoked = if has_tokens {
+            tx.execute(
+                "UPDATE auth_tokens SET revoked_at = NOW()
+                 WHERE used_at IS NULL AND revoked_at IS NULL",
+                &[],
+            )
+            .await?
+        } else {
+            0
+        };
+        if revoked > 0 {
+            info!("Revoked {revoked} unused invitation or reset link(s) restored from the backup");
+        }
+
         tx.commit().await?;
         if !report.warnings.is_empty() {
             warn!("Restore finished with warnings: {:?}", report.warnings);

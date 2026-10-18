@@ -4,6 +4,7 @@
 //! and TOTP-based two-factor authentication.
 
 pub mod throttle;
+pub mod tokens;
 pub mod totp;
 
 use actix_web::HttpRequest;

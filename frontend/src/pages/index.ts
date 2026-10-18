@@ -6,5 +6,6 @@ export { SettingsPage } from './SettingsPage';
 export { SetupPage } from './SetupPage';
 export { LoginPage } from './LoginPage';
 export { RegisterPage } from './RegisterPage';
+export { ResetPasswordPage } from './ResetPasswordPage';
 export { RecoveryPage } from './RecoveryPage';
 export { NotificationsPage } from './NotificationsPage';

@@ -11,20 +11,23 @@ use rand::Rng;
 use uuid::Uuid;
 
 use crate::auth::throttle::{self, Subject};
+use crate::auth::tokens;
 use crate::auth::{
     extract_token, generate_partial_token, generate_token, hash_password, issue_token,
     validate_password, validate_username, verify_against_dummy, verify_password, verify_token,
     AuthContext, PasswordWorkError, ARGON2_RETRY_AFTER_SECS,
 };
-use crate::db::DatabaseService;
+use crate::db::{DatabaseService, InviteRegistration, PasswordReset};
 use crate::models::{
     AdminCreateUserRequest, AdminUpdateUserRequest, ApiResponse, ChangePasswordRequest,
     ConfirmRecoveryCodesRequest, CreateInventoryShareRequest, CreateUserAccessGrantRequest,
-    ErrorResponse, GenerateRecoveryCodesRequest, InitialSetupRequest, LoginRequest, LoginResponse,
-    LoginTotpRequiredResponse, RecoveryCodeUsedResponse, RecoveryCodesResponse,
-    RecoveryCodesStatus, SessionTokenResponse, SetupStatusResponse, TransferOwnershipRequest,
-    TransferOwnershipResponse, UpdateInventoryShareRequest, UpdateProfileRequest,
-    UpdateUserSettingsRequest, UseRecoveryCodeRequest, UserResponse,
+    ErrorResponse, GenerateRecoveryCodesRequest, InitialSetupRequest, InviteCheckResponse,
+    IssueTokenRequest, IssuedTokenResponse, LoginRequest, LoginResponse, LoginTotpRequiredResponse,
+    RecoveryCodeUsedResponse, RecoveryCodesResponse, RecoveryCodesStatus, RegistrationMode,
+    RegistrationSettingsResponse, ResetPasswordRequest, SessionTokenResponse, SetupStatusResponse,
+    TokenRequest, TransferOwnershipRequest, TransferOwnershipResponse, UpdateInventoryShareRequest,
+    UpdateProfileRequest, UpdateRegistrationSettingsRequest, UpdateUserSettingsRequest,
+    UseRecoveryCodeRequest, UserResponse,
 };
 use crate::rate_limit::client_ip_key;
 
@@ -184,15 +187,23 @@ pub async fn get_setup_status(pool: web::Data<Pool>) -> Result<impl Responder> {
     let db_service = DatabaseService::new(pool.get_ref().clone());
 
     match db_service.get_user_count().await {
-        Ok(count) => Ok(HttpResponse::Ok().json(ApiResponse {
-            success: true,
-            data: Some(SetupStatusResponse {
-                needs_setup: count == 0,
-                user_count: count,
-            }),
-            message: None,
-            error: None,
-        })),
+        Ok(count) => {
+            // Only used to decide what the sign-in page offers; if it cannot be read, say invite
+            let registration_mode = db_service
+                .get_registration_mode()
+                .await
+                .unwrap_or(RegistrationMode::Invite);
+            Ok(HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                data: Some(SetupStatusResponse {
+                    needs_setup: count == 0,
+                    user_count: count,
+                    registration_mode,
+                }),
+                message: None,
+                error: None,
+            }))
+        },
         Err(e) => {
             error!("Error checking setup status: {}", e);
             Ok(HttpResponse::InternalServerError().json(ErrorResponse {
@@ -478,7 +489,45 @@ pub async fn login(
     }))
 }
 
-/// Register new user (public registration after initial setup)
+/// 403 for a registration without a usable invitation. The same response for every way an
+/// invitation can be unusable (unknown, used, revoked, expired, not an invitation), so it says
+/// nothing about which one it was.
+fn invitation_required() -> HttpResponse {
+    HttpResponse::Forbidden().json(ErrorResponse {
+        success: false,
+        error: "Registration is by invitation only".to_string(),
+        message: Some("A valid invitation link is required to register".to_string()),
+    })
+}
+
+fn registration_closed() -> HttpResponse {
+    HttpResponse::Forbidden().json(ErrorResponse {
+        success: false,
+        error: "Registration is closed".to_string(),
+        message: Some("New accounts can only be created by an administrator".to_string()),
+    })
+}
+
+fn username_taken() -> HttpResponse {
+    HttpResponse::Conflict().json(ErrorResponse {
+        success: false,
+        error: "Username already taken".to_string(),
+        message: Some("Please choose a different username".to_string()),
+    })
+}
+
+fn database_error(what: &str, e: &dyn std::fmt::Display) -> HttpResponse {
+    error!("{what}: {e}");
+    HttpResponse::InternalServerError().json(ErrorResponse {
+        success: false,
+        error: "Database error".to_string(),
+        message: None,
+    })
+}
+
+/// Register new user (after initial setup). Who may register depends on the registration mode:
+/// anyone when open, only the holder of a valid invitation when invite-only, nobody when closed.
+/// An invitation always makes an ordinary, active user.
 #[post("/auth/register")]
 pub async fn register(
     pool: web::Data<Pool>,
@@ -497,16 +546,37 @@ pub async fn register(
                 ),
             }));
         },
-        Err(e) => {
-            error!("Database error checking user count: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "Database error".to_string(),
-                message: None,
-            }));
-        },
+        Err(e) => return Ok(database_error("Database error checking user count", &e)),
         _ => {},
     }
+
+    // Who may register. The invitation is only looked at (not used up) until the account exists.
+    let mode = match db_service.get_registration_mode().await {
+        Ok(mode) => mode,
+        Err(e) => return Ok(database_error("Error reading registration mode", &e)),
+    };
+    let invite_hash = match mode {
+        RegistrationMode::Closed => return Ok(registration_closed()),
+        RegistrationMode::Open => None,
+        RegistrationMode::Invite => {
+            let hash = req
+                .invite_token
+                .as_deref()
+                .filter(|token| tokens::is_well_formed(token))
+                .map(tokens::hash_token);
+            let usable = match &hash {
+                Some(hash) => match db_service.invite_is_redeemable(hash).await {
+                    Ok(usable) => usable,
+                    Err(e) => return Ok(database_error("Error checking invitation", &e)),
+                },
+                None => false,
+            };
+            if !usable {
+                return Ok(invitation_required());
+            }
+            hash
+        },
+    };
 
     // Validate username
     if let Err(msg) = validate_username(&req.username) {
@@ -528,11 +598,7 @@ pub async fn register(
 
     // Check if username already exists
     if let Ok(Some(_)) = db_service.get_user_by_username(&req.username).await {
-        return Ok(HttpResponse::Conflict().json(ErrorResponse {
-            success: false,
-            error: "Username already taken".to_string(),
-            message: Some("Please choose a different username".to_string()),
-        }));
+        return Ok(username_taken());
     }
 
     // Hash password
@@ -552,34 +618,62 @@ pub async fn register(
     };
 
     // Create user (non-admin, active)
-    let user = match db_service
-        .create_user(
-            &req.username,
-            &req.full_name,
-            &password_hash,
-            false, // not admin
-            true,  // active
-        )
-        .await
-    {
-        Ok(u) => u,
-        Err(e) => {
-            error!("Error creating user: {}", e);
-            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "An internal error occurred".to_string(),
-                message: Some("Failed to create account".to_string()),
-            }));
-        },
-    };
+    let user = if let Some(token_hash) = invite_hash {
+        match db_service
+            .register_with_invite(&token_hash, &req.username, &req.full_name, &password_hash)
+            .await
+        {
+            Ok(InviteRegistration::Registered { user, token_id }) => {
+                info!(
+                    target: "audit",
+                    "invite_redeemed token={token_id} subject={0} actor={0}",
+                    user.id
+                );
+                user
+            },
+            // Used by someone else between the check and now
+            Ok(InviteRegistration::InviteInvalid) => return Ok(invitation_required()),
+            Ok(InviteRegistration::UsernameTaken) => return Ok(username_taken()),
+            Err(e) => {
+                error!("Error creating user: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                    success: false,
+                    error: "An internal error occurred".to_string(),
+                    message: Some("Failed to create account".to_string()),
+                }));
+            },
+        }
+    } else {
+        let user = match db_service
+            .create_user(
+                &req.username,
+                &req.full_name,
+                &password_hash,
+                false, // not admin
+                true,  // active
+            )
+            .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                error!("Error creating user: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                    success: false,
+                    error: "An internal error occurred".to_string(),
+                    message: Some("Failed to create account".to_string()),
+                }));
+            },
+        };
 
-    // Create default settings for the user
-    if let Err(e) = db_service.create_user_settings(user.id).await {
-        warn!(
-            "Failed to create user settings for {}: {}",
-            user.username, e
-        );
-    }
+        // Create default settings for the user
+        if let Err(e) = db_service.create_user_settings(user.id).await {
+            warn!(
+                "Failed to create user settings for {}: {}",
+                user.username, e
+            );
+        }
+        user
+    };
 
     // Generate token for immediate login
     let token = match generate_token(&user) {
@@ -605,6 +699,120 @@ pub async fn register(
         message: Some("Registration successful".to_string()),
         error: None,
     }))
+}
+
+/// Whether an invitation can be used right now. Answers only yes or no, and the same "no" for
+/// every kind of unusable token (and for any token while registration is closed).
+#[post("/auth/invite/check")]
+pub async fn check_invite(
+    pool: web::Data<Pool>,
+    body: web::Json<TokenRequest>,
+) -> Result<impl Responder> {
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    let valid = if tokens::is_well_formed(&body.token) {
+        match db_service.get_registration_mode().await {
+            Ok(RegistrationMode::Invite) => {
+                match db_service
+                    .invite_is_redeemable(&tokens::hash_token(&body.token))
+                    .await
+                {
+                    Ok(valid) => valid,
+                    Err(e) => return Ok(database_error("Error checking invitation", &e)),
+                }
+            },
+            Ok(_) => false,
+            Err(e) => return Ok(database_error("Error reading registration mode", &e)),
+        }
+    } else {
+        false
+    };
+
+    Ok(HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        data: Some(InviteCheckResponse { valid }),
+        message: None,
+        error: None,
+    }))
+}
+
+/// 400 for a reset link that cannot be used; the same for every reason.
+fn invalid_reset_link() -> HttpResponse {
+    HttpResponse::BadRequest().json(ErrorResponse {
+        success: false,
+        error: "Invalid or expired link".to_string(),
+        message: Some("Ask an administrator for a new password reset link".to_string()),
+    })
+}
+
+/// Set a new password with a reset link from an administrator. Does not sign anyone in: the user
+/// signs in afterwards, with two-factor authentication where it is on.
+#[post("/auth/reset-password")]
+pub async fn reset_password_with_token(
+    pool: web::Data<Pool>,
+    body: web::Json<ResetPasswordRequest>,
+) -> Result<impl Responder> {
+    // The same password policy as registration
+    if let Err(msg) = validate_password(&body.new_password) {
+        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: msg.to_string(),
+            message: Some("Invalid password".to_string()),
+        }));
+    }
+
+    if !tokens::is_well_formed(&body.token) {
+        return Ok(invalid_reset_link());
+    }
+    let token_hash = tokens::hash_token(&body.token);
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    // Password hashing is expensive and this endpoint is public: do it only for a link that is
+    // usable. The hash then goes through the same Argon2 limit as every other password hash.
+    match db_service.reset_token_is_redeemable(&token_hash).await {
+        Ok(true) => {},
+        Ok(false) => return Ok(invalid_reset_link()),
+        Err(e) => return Ok(database_error("Error checking reset link", &e)),
+    }
+
+    let password_hash = match hash_password(body.new_password.clone()).await {
+        Ok(hash) => hash,
+        Err(e) => {
+            if matches!(e, PasswordWorkError::Busy) {
+                return Ok(crate::api::auth::busy_response());
+            }
+            error!("Error hashing password: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(ErrorResponse {
+                success: false,
+                error: "Failed to process password".to_string(),
+                message: None,
+            }));
+        },
+    };
+
+    match db_service
+        .reset_password_with_token(&token_hash, &password_hash)
+        .await
+    {
+        Ok(PasswordReset::Done {
+            user_id, token_id, ..
+        }) => {
+            info!(
+                target: "audit",
+                "password_reset_by_link token={token_id} subject={user_id} actor={user_id}"
+            );
+            audit_sessions_revoked(user_id, &user_id.to_string(), "password_reset_link");
+            Ok(HttpResponse::Ok().json(ApiResponse::<()> {
+                success: true,
+                data: None,
+                message: Some("Password updated. You can now sign in.".to_string()),
+                error: None,
+            }))
+        },
+        // Used or revoked between the check and now
+        Ok(PasswordReset::LinkInvalid) => Ok(invalid_reset_link()),
+        Err(e) => Ok(database_error("Error resetting password", &e)),
+    }
 }
 
 // ==================== Authenticated User Endpoints ====================
@@ -1365,6 +1573,287 @@ pub async fn admin_delete_user(
 }
 
 // ==================== Inventory Sharing Endpoints ====================
+
+// ==================== Registration mode, invitations and reset links (admin) ====================
+
+/// Invitation lifetime, in hours: 7 days unless the admin asks otherwise, at most 30 days.
+const INVITE_DEFAULT_HOURS: i64 = 7 * 24;
+const INVITE_MAX_HOURS: i64 = 30 * 24;
+/// Reset link lifetime, in hours: 24 hours unless the admin asks otherwise, at most 7 days.
+const RESET_DEFAULT_HOURS: i64 = 24;
+const RESET_MAX_HOURS: i64 = 7 * 24;
+
+/// The lifetime to use, or the 400 to send for one out of range.
+fn lifetime_hours(requested: Option<i64>, default: i64, max: i64) -> Result<i32, HttpResponse> {
+    let hours = requested.unwrap_or(default);
+    if (1..=max).contains(&hours) {
+        return Ok(i32::try_from(hours).unwrap_or(i32::MAX));
+    }
+    Err(HttpResponse::BadRequest().json(ErrorResponse {
+        success: false,
+        error: "Invalid expiry".to_string(),
+        message: Some(format!("expires_in_hours must be between 1 and {max}")),
+    }))
+}
+
+async fn registration_settings_response(db_service: &DatabaseService) -> HttpResponse {
+    let registration_mode = match db_service.get_registration_mode().await {
+        Ok(mode) => mode,
+        Err(e) => return database_error("Error reading registration mode", &e),
+    };
+    let upgrade_notice = match db_service.registration_upgrade_notice_pending().await {
+        Ok(pending) => pending,
+        Err(e) => return database_error("Error reading registration notice", &e),
+    };
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        data: Some(RegistrationSettingsResponse {
+            registration_mode,
+            upgrade_notice,
+        }),
+        message: None,
+        error: None,
+    })
+}
+
+/// Who may register, and whether to show the upgrade notice (admin only)
+#[get("/admin/settings/registration")]
+pub async fn admin_get_registration_settings(
+    pool: web::Data<Pool>,
+    req: HttpRequest,
+) -> Result<impl Responder> {
+    if let Err(response) = require_admin(&req, pool.get_ref()).await {
+        return Ok(response);
+    }
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+    Ok(registration_settings_response(&db_service).await)
+}
+
+/// Choose who may register and/or dismiss the upgrade notice (admin only)
+#[put("/admin/settings/registration")]
+pub async fn admin_update_registration_settings(
+    pool: web::Data<Pool>,
+    req: HttpRequest,
+    body: web::Json<UpdateRegistrationSettingsRequest>,
+) -> Result<impl Responder> {
+    let auth_ctx = match require_admin(&req, pool.get_ref()).await {
+        Ok(ctx) => ctx,
+        Err(response) => return Ok(response),
+    };
+    if body.registration_mode.is_none() && body.dismiss_upgrade_notice.is_none() {
+        return Ok(HttpResponse::BadRequest().json(ErrorResponse {
+            success: false,
+            error: "Nothing to change".to_string(),
+            message: Some("Send registration_mode and/or dismiss_upgrade_notice".to_string()),
+        }));
+    }
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    if let Some(mode) = body.registration_mode {
+        if let Err(e) = db_service.set_registration_mode(mode).await {
+            return Ok(database_error("Error setting registration mode", &e));
+        }
+        info!(
+            target: "audit",
+            "registration_mode_changed mode={} actor={}",
+            mode.as_str(),
+            auth_ctx.user_id
+        );
+    }
+    if body.dismiss_upgrade_notice == Some(true) {
+        if let Err(e) = db_service.dismiss_registration_upgrade_notice().await {
+            return Ok(database_error("Error dismissing registration notice", &e));
+        }
+        info!(
+            target: "audit",
+            "registration_notice_dismissed actor={}",
+            auth_ctx.user_id
+        );
+    }
+    Ok(registration_settings_response(&db_service).await)
+}
+
+/// Create an invitation link (admin only). The token is returned once and never shown again.
+#[post("/admin/invites")]
+pub async fn admin_create_invite(
+    pool: web::Data<Pool>,
+    req: HttpRequest,
+    body: web::Json<IssueTokenRequest>,
+) -> Result<impl Responder> {
+    let auth_ctx = match require_admin(&req, pool.get_ref()).await {
+        Ok(ctx) => ctx,
+        Err(response) => return Ok(response),
+    };
+    let hours = match lifetime_hours(
+        body.expires_in_hours,
+        INVITE_DEFAULT_HOURS,
+        INVITE_MAX_HOURS,
+    ) {
+        Ok(hours) => hours,
+        Err(response) => return Ok(response),
+    };
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    match db_service.get_registration_mode().await {
+        Ok(RegistrationMode::Closed) => {
+            return Ok(HttpResponse::Conflict().json(ErrorResponse {
+                success: false,
+                error: "Registration is closed".to_string(),
+                message: Some(
+                    "Invitations cannot be created while registration is closed. \
+                     Change the registration mode first."
+                        .to_string(),
+                ),
+            }));
+        },
+        Ok(_) => {},
+        Err(e) => return Ok(database_error("Error reading registration mode", &e)),
+    }
+
+    let token = tokens::generate_token();
+    match db_service
+        .create_invite(auth_ctx.user_id, &tokens::hash_token(&token), hours)
+        .await
+    {
+        Ok((id, expires_at)) => {
+            info!(
+                target: "audit",
+                "invite_created id={id} actor={} expires_at={expires_at}",
+                auth_ctx.user_id
+            );
+            Ok(HttpResponse::Created().json(ApiResponse {
+                success: true,
+                data: Some(IssuedTokenResponse {
+                    id,
+                    token,
+                    expires_at,
+                }),
+                message: Some("Invitation created. The link is shown only once.".to_string()),
+                error: None,
+            }))
+        },
+        Err(e) => Ok(database_error("Error creating invitation", &e)),
+    }
+}
+
+/// Invitations that can still be used (admin only). Never includes the secret.
+#[get("/admin/invites")]
+pub async fn admin_list_invites(pool: web::Data<Pool>, req: HttpRequest) -> Result<impl Responder> {
+    if let Err(response) = require_admin(&req, pool.get_ref()).await {
+        return Ok(response);
+    }
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+    match db_service.list_open_invites().await {
+        Ok(invites) => Ok(HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            data: Some(invites),
+            message: None,
+            error: None,
+        })),
+        Err(e) => Ok(database_error("Error listing invitations", &e)),
+    }
+}
+
+/// Revoke an unused invitation (admin only)
+#[delete("/admin/invites/{id}")]
+pub async fn admin_revoke_invite(
+    pool: web::Data<Pool>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+) -> Result<impl Responder> {
+    let auth_ctx = match require_admin(&req, pool.get_ref()).await {
+        Ok(ctx) => ctx,
+        Err(response) => return Ok(response),
+    };
+    let id = path.into_inner();
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+    match db_service.revoke_invite(id).await {
+        Ok(true) => {
+            info!(target: "audit", "invite_revoked id={id} actor={}", auth_ctx.user_id);
+            Ok(HttpResponse::Ok().json(ApiResponse::<()> {
+                success: true,
+                data: None,
+                message: Some("Invitation revoked".to_string()),
+                error: None,
+            }))
+        },
+        Ok(false) => Ok(HttpResponse::NotFound().json(ErrorResponse {
+            success: false,
+            error: "Invitation not found".to_string(),
+            message: None,
+        })),
+        Err(e) => Ok(database_error("Error revoking invitation", &e)),
+    }
+}
+
+/// Create a password reset link for a user (admin only). Replaces any earlier unused link for
+/// them. The token is returned once and never shown again.
+#[post("/admin/users/{id}/reset-link")]
+pub async fn admin_issue_reset_link(
+    pool: web::Data<Pool>,
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<IssueTokenRequest>,
+) -> Result<impl Responder> {
+    let auth_ctx = match require_admin(&req, pool.get_ref()).await {
+        Ok(ctx) => ctx,
+        Err(response) => return Ok(response),
+    };
+    let user_id = path.into_inner();
+    let hours = match lifetime_hours(body.expires_in_hours, RESET_DEFAULT_HOURS, RESET_MAX_HOURS) {
+        Ok(hours) => hours,
+        Err(response) => return Ok(response),
+    };
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    match db_service.get_user_by_id(user_id).await {
+        Ok(Some(_)) => {},
+        Ok(None) => {
+            return Ok(HttpResponse::NotFound().json(ErrorResponse {
+                success: false,
+                error: "User not found".to_string(),
+                message: None,
+            }));
+        },
+        Err(e) => return Ok(database_error("Error looking up user", &e)),
+    }
+
+    let token = tokens::generate_token();
+    match db_service
+        .issue_reset_token(
+            user_id,
+            auth_ctx.user_id,
+            &tokens::hash_token(&token),
+            hours,
+        )
+        .await
+    {
+        Ok(Some((id, expires_at))) => {
+            info!(
+                target: "audit",
+                "reset_link_issued token={id} subject={user_id} actor={} expires_at={expires_at}",
+                auth_ctx.user_id
+            );
+            Ok(HttpResponse::Created().json(ApiResponse {
+                success: true,
+                data: Some(IssuedTokenResponse {
+                    id,
+                    token,
+                    expires_at,
+                }),
+                message: Some("Reset link created. It is shown only once.".to_string()),
+                error: None,
+            }))
+        },
+        // Deleted just now
+        Ok(None) => Ok(HttpResponse::NotFound().json(ErrorResponse {
+            success: false,
+            error: "User not found".to_string(),
+            message: None,
+        })),
+        Err(e) => Ok(database_error("Error creating reset link", &e)),
+    }
+}
 
 /// Get shares for an inventory
 #[get("/inventories/{id}/shares")]

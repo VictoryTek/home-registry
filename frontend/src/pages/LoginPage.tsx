@@ -6,7 +6,7 @@ import '@/styles/auth.css';
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const { login, completeTotpLogin, totpRequired, clearTotpRequired } = useAuth();
+  const { login, completeTotpLogin, totpRequired, clearTotpRequired, registrationMode } = useAuth();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
@@ -298,13 +298,15 @@ export function LoginPage() {
           </form>
 
           <div className="auth-footer">
-            <p>
-              Don&apos;t have an account?{' '}
-              <Link to="/register" className="auth-link">
-                Create one
-              </Link>
-            </p>
-            <p style={{ marginTop: '0.5rem' }}>
+            {registrationMode === 'open' && (
+              <p>
+                Don&apos;t have an account?{' '}
+                <Link to="/register" className="auth-link">
+                  Create one
+                </Link>
+              </p>
+            )}
+            <p style={registrationMode === 'open' ? { marginTop: '0.5rem' } : undefined}>
               <Link to="/recover" className="auth-link">
                 Forgot your password?
               </Link>

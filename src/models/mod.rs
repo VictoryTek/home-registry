@@ -365,6 +365,9 @@ pub struct CreateUserRequest {
     pub username: String,
     pub full_name: String,
     pub password: String,
+    /// The invitation to redeem. Needed when registration is invite-only, ignored when open.
+    #[serde(default)]
+    pub invite_token: Option<String>,
 }
 
 /// Request for admin to create a new user with additional options
@@ -784,6 +787,103 @@ pub struct InitialSetupRequest {
 pub struct SetupStatusResponse {
     pub needs_setup: bool,
     pub user_count: i64,
+    /// Who may register, so the sign-in page knows whether to offer it
+    pub registration_mode: RegistrationMode,
+}
+
+// ==================== Registration Mode and Auth Tokens ====================
+
+/// Who may create an account with `POST /api/auth/register`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistrationMode {
+    /// Anyone
+    Open,
+    /// Only someone holding a valid invitation
+    Invite,
+    /// Nobody; an admin can still create users
+    Closed,
+}
+
+impl RegistrationMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RegistrationMode::Open => "open",
+            RegistrationMode::Invite => "invite",
+            RegistrationMode::Closed => "closed",
+        }
+    }
+
+    /// The stored form; `None` for anything that is not one of the three modes.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(RegistrationMode::Open),
+            "invite" => Some(RegistrationMode::Invite),
+            "closed" => Some(RegistrationMode::Closed),
+            _ => None,
+        }
+    }
+}
+
+/// The registration settings an admin sees
+#[derive(Serialize, Debug)]
+pub struct RegistrationSettingsResponse {
+    pub registration_mode: RegistrationMode,
+    /// An upgrade made registration invite-only and an admin has not yet seen the notice
+    pub upgrade_notice: bool,
+}
+
+/// Change the registration settings; send at least one field
+#[derive(Deserialize, Debug)]
+pub struct UpdateRegistrationSettingsRequest {
+    pub registration_mode: Option<RegistrationMode>,
+    pub dismiss_upgrade_notice: Option<bool>,
+}
+
+/// Create an invitation or a reset link. The expiry has a default and a maximum, both checked
+/// by the server.
+#[derive(Deserialize, Debug, Default)]
+pub struct IssueTokenRequest {
+    #[serde(default)]
+    pub expires_in_hours: Option<i64>,
+}
+
+/// A new invitation or reset link. The token is shown here and never again.
+#[derive(Serialize, Debug)]
+pub struct IssuedTokenResponse {
+    pub id: Uuid,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// An outstanding invitation, without its secret
+#[derive(Serialize, Debug)]
+pub struct InviteInfo {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub created_by_username: Option<String>,
+}
+
+/// A token sent to be checked
+#[derive(Deserialize, Debug)]
+pub struct TokenRequest {
+    pub token: String,
+}
+
+/// Whether an invitation can be used right now
+#[derive(Serialize, Debug)]
+pub struct InviteCheckResponse {
+    pub valid: bool,
+}
+
+/// Set a new password with a reset link
+#[derive(Deserialize, Debug)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub new_password: String,
 }
 
 // ==================== Recovery Codes Models ====================

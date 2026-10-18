@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Registration mode, invitation links and password-reset links (BUGS-SEC12).** Administrators
+  choose who may register (open, invite only or closed) under Settings → User Management. They
+  create single-use invitation links (7 days by default, 1 hour to 30 days) and password-reset
+  links (24 hours by default, 1 hour to 7 days). A reset link lets the user choose a new password
+  and signs them out everywhere. Tokens are 32 random bytes, stored only as a SHA-256 hash, shown
+  once, and carried in the URL fragment (`/register#invite=...`, `/reset#token=...`) so they never
+  reach a server log or a `Referer` header. Redeeming a token and creating the user (or changing
+  the password) is one transaction, so a token cannot be used twice and a failed attempt does not
+  use it up. New endpoints: `GET`/`PUT /api/admin/settings/registration`,
+  `POST`/`GET /api/admin/invites`, `DELETE /api/admin/invites/{id}`,
+  `POST /api/admin/users/{id}/reset-link`, `POST /api/auth/invite/check` and
+  `POST /api/auth/reset-password`. `GET /api/auth/setup/status` now reports `registration_mode`.
+  Restoring a backup revokes every unused invitation and reset link. Audit log lines (target
+  `audit`) record the acting user and the objects, never a token.
+
 ### Fixed
 - **Dates no longer show one day early west of UTC, and the warranty countdown is no longer off
   by one.** Purchase dates and warranty expiry dates are calendar days (`YYYY-MM-DD`), but the
@@ -38,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy's access log to see probes.
 
 ### Changed
+- **Breaking: registration is invite-only by default (migration V028).** `POST /api/auth/register`
+  used to create an account for anyone. Every install, new or upgraded, now starts as invite
+  only, and the request needs an `invite_token` from an administrator's invitation link. An
+  administrator can switch back to open registration in Settings → User Management; after an
+  upgrade that screen shows a notice until it is dismissed, and the server logs a one-time warning
+  at start-up. The password field was removed from the admin edit-user form: reset a password with
+  a reset link instead (`PUT /api/admin/users/{id}` still accepts `password` for API clients).
+  `GET /api/auth/setup/status` gains a `registration_mode` field, and the sign-in page offers
+  "Create one" only when registration is open.
 - **Breaking (tooling): building the frontend now needs Node.js 20 or newer** (`engines.node` in
   `frontend/package.json` was `>=18`; `engine-strict` is on, so `npm install` refuses older
   versions). The Docker image and CI already used Node 20. Needed for the new test runner.

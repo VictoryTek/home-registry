@@ -205,7 +205,7 @@ The application supports the following configuration through environment variabl
 | `JWT_TOKEN_LIFETIME_HOURS` | JWT token expiration time in hours | `24` | No |
 | `RATE_LIMIT_RPS` | Sustained API requests per second per client (enforced over 60 s) | `50` | No |
 | `RATE_LIMIT_BURST` | Maximum API requests per client in any 1-second window | `100` | No |
-| `AUTH_RATE_LIMIT_PER_MINUTE` | Requests per minute per client to login, register, setup and recovery endpoints | `20` | No |
+| `AUTH_RATE_LIMIT_PER_MINUTE` | Requests per minute per client to login, register, invitation check, password reset, setup and recovery endpoints | `20` | No |
 | `TRUST_PROXY_HEADERS` | Identify clients by `Forwarded` / `X-Forwarded-For` (only behind a trusted reverse proxy) | `false` | No |
 
 **\*JWT_SECRET Note:** If not explicitly set, a random secret is generated and persisted to `/app/data/jwt_secret`. This ensures tokens remain valid across container restarts. For production, it's recommended to set this explicitly.
@@ -229,18 +229,37 @@ The application supports the following configuration through environment variabl
 - A request whose body, query string or path is rejected is logged as `Rejected request: <method> "<route>" (<category>)`. Neither the content nor the validation message is logged, and the error response never repeats what was sent.
 - Do not run production with `RUST_LOG=actix_web=debug` (or `debug` / `trace` globally): actix-web's own debug lines for failed request parsing include the concrete request path, which this application otherwise keeps out of its logs.
 
+### Registration, invitations and password resets
+
+Who can create an account is a setting, under **Settings → User Management → Registration** (administrators only):
+
+| Mode | Who can register |
+|------|------------------|
+| **Invite only** (default) | Only someone holding an invitation link from an administrator. |
+| **Open** | Anyone who can reach the sign-in page. |
+| **Closed** | Nobody. Administrators can still add users, and invitations that were already made keep their expiry and work again if you switch back to invite only. |
+
+- **Invitation links:** **Invite Someone** creates a link such as `https://your-host/register#invite=...` that works once and expires after 7 days. The account it creates is always an ordinary, active user; an invitation cannot make an administrator. Unused invitations are listed and can be revoked.
+- **Password reset links:** the key button next to a user creates `https://your-host/reset#token=...`, valid for 24 hours. Whoever opens it chooses a new password (the same rules as everywhere else) and is signed out on every device; they are not signed in automatically, and two-factor authentication still applies when they sign in. A newer link for the same user replaces the older one, and deleting the user ends it. There is no typed-password reset in the interface any more.
+- **Copy the link when it is shown.** Only a SHA-256 fingerprint of the token is stored, so the link cannot be shown again; create a new one if it is lost.
+- **Why the token is after a `#`:** a browser never sends the part after `#` to the server, so tokens stay out of your reverse proxy's access log and out of `Referer` headers. The page removes it from the address bar as soon as it has read it, so reloading the page needs the link again.
+- **Backups:** the registration setting and the (hashed) tokens are part of a backup, but **restoring revokes every unused invitation and reset link**, so a backup can never bring back a link that has since been used or revoked.
+- The invitation and reset endpoints share the per-client limit for credential endpoints (`AUTH_RATE_LIMIT_PER_MINUTE`).
+
 ### Backups and restore
 
 Administrators create, download, upload and restore backups under **Settings → Backup & Restore**. Backups are JSON files in `/app/backups` (the `backups` volume).
 
 - **What is in a backup:** every table in the database, read from one consistent snapshot, plus the database schema version and the app version. New tables are included automatically. **Uploaded photos (the `uploads` volume) are not part of a backup**; back that volume up separately.
 - **Treat backup files as secrets.** They contain password hashes, recovery-code hashes and the encrypted two-factor secrets. Someone holding a backup can try to guess a weak `JWT_SECRET` offline (the two-factor secrets are encrypted with a key derived from it unless you set `TOTP_ENCRYPTION_KEY`). Use a long random `JWT_SECRET`, and set `TOTP_ENCRYPTION_KEY` separately so changing `JWT_SECRET` later does not make two-factor authentication unreadable.
-- **Restoring replaces everything** with the backup's contents, in one transaction (any error leaves the database untouched). A backup of the current data is written first, and the restore is aborted if that fails. **All sessions end**: everyone, including the administrator who restored, signs in again.
+- **Restoring replaces everything** with the backup's contents, in one transaction (any error leaves the database untouched). A backup of the current data is written first, and the restore is aborted if that fails. **All sessions end**: everyone, including the administrator who restored, signs in again. **Unused invitation and password-reset links are revoked** as well (see *Registration, invitations and password resets*).
 - **Compatibility:** backups from older versions restore (tables or columns that no longer exist are skipped, and the result lists them). A backup made by a **newer** version than the server is refused; update the server first.
 - **Two-factor key:** if the backup contains two-factor enrolment encrypted with a different key than this server's, the restore is refused. Start the server with the original `TOTP_ENCRYPTION_KEY` (or `JWT_SECRET`) and restore again. Alternatively choose *Restore Without 2FA* in the second dialog: everything else is restored, two-factor authentication is cleared for the affected users, and until they set it up again they can sign in with their password alone.
 - **File names:** only names generated by the application (`home_registry_<timestamp>[_<suffix>].json`, `home_registry_auto_pre_restore_...`) are listed and can be downloaded, restored or deleted. A `.json` file with another name placed in the folder by hand is ignored; rename it to the pattern to use it.
 
 ### Upgrade notes
+
+**Migration V028: registration is now invite-only.** Until now anyone who could reach the sign-in page could create an account, with no way to turn that off. Every install, new or upgraded, now starts as **invite only**. If you relied on open sign-up, an administrator can switch it back under **Settings → User Management → Registration** (and sees a notice there after an upgrade until they dismiss it). The server logs a one-time warning on the first start after the upgrade. Custom clients of `POST /api/auth/register` now need an `invite_token` unless the mode is open. This migration adds the `app_settings` and `auth_tokens` tables.
 
 **Migration V026 removes unused tables.** It drops `categories`, `tags`, `item_tags`, `custom_fields`, `item_custom_values`, `password_reset_tokens` and the column `items.category_id`. The feature they were meant for was replaced by organizers, and password reset by recovery codes and two-factor authentication. No tagged release (v0.1.0-beta.1 to v0.1.0-beta.3) ever wrote to any of them, so they should be empty. (A short-lived password-reset feature wrote `password_reset_tokens` on the development branch for a few days in February 2026, before beta.1.) The item's own `category` text field is not affected.
 

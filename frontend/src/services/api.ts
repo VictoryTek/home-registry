@@ -20,6 +20,10 @@ import type {
   User,
   UserSettings,
   SetupStatusResponse,
+  RegistrationSettings,
+  RegistrationMode,
+  IssuedToken,
+  InviteInfo,
   LoginRequest,
   LoginResponse,
   LoginApiResponse,
@@ -606,6 +610,8 @@ export const authApi = {
     username: string;
     full_name: string;
     password: string;
+    /** The invitation from the link, needed while registration is invite-only */
+    invite_token?: string;
   }): Promise<ApiResponse<LoginResponse>> {
     const response = await fetchWithRetry(`${API_BASE}/auth/register`, {
       method: 'POST',
@@ -613,6 +619,26 @@ export const authApi = {
       body: JSON.stringify(data),
     });
     return handleResponse<LoginResponse>(response);
+  },
+
+  // Whether an invitation can be used. Yes or no only; the token goes in the body, not the URL.
+  async checkInvite(token: string): Promise<ApiResponse<{ valid: boolean }>> {
+    const response = await fetchWithRetry(`${API_BASE}/auth/invite/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    return handleResponse<{ valid: boolean }>(response);
+  },
+
+  // Set a new password with a reset link from an administrator
+  async resetPassword(token: string, newPassword: string): Promise<ApiResponse<null>> {
+    const response = await fetchWithRetry(`${API_BASE}/auth/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, new_password: newPassword }),
+    });
+    return handleResponse<null>(response);
   },
 
   // Get current user profile
@@ -744,6 +770,68 @@ export const authApi = {
       headers: getHeaders(),
     });
     return handleResponse<{ message: string }>(response);
+  },
+
+  // Admin: who may register
+  async getRegistrationSettings(): Promise<ApiResponse<RegistrationSettings>> {
+    const response = await fetchWithRetry(`${API_BASE}/admin/settings/registration`, {
+      headers: getHeaders(),
+    });
+    return handleResponse<RegistrationSettings>(response);
+  },
+
+  // Admin: choose who may register and/or dismiss the upgrade notice
+  async updateRegistrationSettings(data: {
+    registration_mode?: RegistrationMode;
+    dismiss_upgrade_notice?: boolean;
+  }): Promise<ApiResponse<RegistrationSettings>> {
+    const response = await fetchWithRetry(`${API_BASE}/admin/settings/registration`, {
+      method: 'PUT',
+      headers: getHeaders(),
+      body: JSON.stringify(data),
+    });
+    return handleResponse<RegistrationSettings>(response);
+  },
+
+  // Admin: create an invitation (the token in the answer is shown once)
+  async createInvite(expiresInHours?: number): Promise<ApiResponse<IssuedToken>> {
+    const response = await fetchWithRetry(`${API_BASE}/admin/invites`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(
+        expiresInHours === undefined ? {} : { expires_in_hours: expiresInHours }
+      ),
+    });
+    return handleResponse<IssuedToken>(response);
+  },
+
+  // Admin: invitations that can still be used
+  async listInvites(): Promise<ApiResponse<InviteInfo[]>> {
+    const response = await fetchWithRetry(`${API_BASE}/admin/invites`, {
+      headers: getHeaders(),
+    });
+    return handleResponse<InviteInfo[]>(response);
+  },
+
+  // Admin: revoke an unused invitation
+  async revokeInvite(inviteId: string): Promise<ApiResponse<null>> {
+    const response = await fetchWithRetry(`${API_BASE}/admin/invites/${inviteId}`, {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    return handleResponse<null>(response);
+  },
+
+  // Admin: create a password reset link for a user (the token in the answer is shown once)
+  async issueResetLink(userId: string, expiresInHours?: number): Promise<ApiResponse<IssuedToken>> {
+    const response = await fetchWithRetry(`${API_BASE}/admin/users/${userId}/reset-link`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(
+        expiresInHours === undefined ? {} : { expires_in_hours: expiresInHours }
+      ),
+    });
+    return handleResponse<IssuedToken>(response);
   },
 
   // ==================== Inventory Sharing ====================
