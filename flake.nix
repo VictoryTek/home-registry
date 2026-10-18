@@ -35,7 +35,7 @@
 
             src = ./frontend;
 
-            npmDepsHash = "sha256-J9g5OK/v8Qn8UD81kvpTDsSgBVkztpI4An57rxaSROU=";
+            npmDepsHash = "sha256-DrrbiyIbeFDa/cMhCyoZ2CttCJsa+veSw/Z6domSIDQ=";
 
             npmBuildScript = "build";
 

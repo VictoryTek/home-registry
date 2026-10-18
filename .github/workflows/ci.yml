@@ -175,6 +175,9 @@ jobs:
       - name: Prettier check
         run: npm run format:check
 
+      - name: Unit tests (every time zone)
+        run: npm test
+
       - name: Build
         run: npm run build
 

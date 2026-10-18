@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Dates no longer show one day early west of UTC, and the warranty countdown is no longer off
+  by one.** Purchase dates and warranty expiry dates are calendar days (`YYYY-MM-DD`), but the
+  browser read them as UTC midnight, which is the previous evening in the Americas. They are now
+  shown as stored, in every time zone. The warranty countdown counts calendar days from the
+  local date, so it is right in the evening and also across a daylight saving change (a week
+  used to read as 8 days when the clocks went back). A warranty is valid through its expiry
+  date: the item detail shows "(Active)" that day and "(Expired)" from the next, matching the
+  notifications. The inventory report's CSV file name now carries the local date, not the UTC
+  date.
 - **Malformed requests under `/api` now get the standard JSON error response.** Bad JSON, a
   missing or wrong-typed field, an oversized body (413), a wrong `Content-Type`, an invalid
   query string and an unparsable path id used to get actix's plain-text error (the custom
@@ -29,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy's access log to see probes.
 
 ### Changed
+- **Breaking (tooling): building the frontend now needs Node.js 20 or newer** (`engines.node` in
+  `frontend/package.json` was `>=18`; `engine-strict` is on, so `npm install` refuses older
+  versions). The Docker image and CI already used Node 20. Needed for the new test runner.
+- **The frontend now has unit tests.** `npm test` runs them once per time zone (eight zones,
+  including ones west and east of UTC and ones with daylight saving), and CI and
+  `scripts/preflight.sh` / `preflight.ps1` run them. Adds Vitest 4.1.12 as a pinned dev dependency.
 - **Breaking (API): `POST /api/items` now requires `inventory_id`.** It must be a positive integer.
   Omitting it, or sending `0` or a negative number, returns `400`; a body without the field is
   rejected while the JSON is parsed. Previously a request without it silently created the item in

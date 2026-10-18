@@ -13,9 +13,10 @@ import {
 import { inventoryApi, itemApi, organizerApi, imageApi } from '@/services/api';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
-import { formatDate, type DateFormatType } from '@/utils/dateFormat';
+import { formatDateOnly, formatTimestamp, type DateFormatType } from '@/utils/dateFormat';
 import { formatCurrency, type CurrencyType } from '@/utils/currencyFormat';
-import { getNotificationMessage } from '@/utils/notifications';
+import { getNotificationMessage, isWarrantyExpired } from '@/utils/notifications';
+import { itemToEditFormData, toCreateItemRequest } from '@/utils/itemForm';
 import type {
   Inventory,
   Item,
@@ -199,10 +200,7 @@ export function InventoryDetailPage() {
     }
 
     try {
-      const result = await itemApi.create({
-        ...newItem,
-        inventory_id: inventoryId,
-      });
+      const result = await itemApi.create(toCreateItemRequest(newItem, inventoryId));
 
       if (result.success && result.data) {
         // Save organizer values if any are set
@@ -262,15 +260,7 @@ export function InventoryDetailPage() {
   // Issue 2: Edit Item handlers
   const handleOpenEditItem = async (item: Item) => {
     setEditingItem(item);
-    setEditItemData({
-      name: item.name,
-      description: item.description ?? '',
-      purchase_date: item.purchase_date ?? '',
-      purchase_price: item.purchase_price,
-      warranty_expiry: item.warranty_expiry ?? '',
-      notes: item.notes ?? '',
-      quantity: item.quantity ?? 1,
-    });
+    setEditItemData(itemToEditFormData(item));
     setEditOrganizerValues({});
     if (item.id) {
       try {
@@ -553,7 +543,7 @@ export function InventoryDetailPage() {
                               <i className="fas fa-calendar-alt"></i>
                               <span>
                                 Purchased:{' '}
-                                {formatDate(
+                                {formatDateOnly(
                                   item.purchase_date,
                                   (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
                                 )}
@@ -589,7 +579,7 @@ export function InventoryDetailPage() {
                               <i className="fas fa-shield-alt"></i>
                               <span>
                                 Warranty:{' '}
-                                {formatDate(
+                                {formatDateOnly(
                                   item.warranty_expiry,
                                   (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
                                 )}
@@ -922,7 +912,7 @@ export function InventoryDetailPage() {
                     Purchase Date
                   </label>
                   <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
-                    {formatDate(
+                    {formatDateOnly(
                       viewingItem.purchase_date,
                       (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
                     )}
@@ -936,13 +926,11 @@ export function InventoryDetailPage() {
                     Warranty Expiry
                   </label>
                   <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
-                    {formatDate(
+                    {formatDateOnly(
                       viewingItem.warranty_expiry,
                       (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
                     )}
-                    {new Date(viewingItem.warranty_expiry) < new Date()
-                      ? ' (Expired)'
-                      : ' (Active)'}
+                    {isWarrantyExpired(viewingItem.warranty_expiry) ? ' (Expired)' : ' (Active)'}
                   </p>
                 </div>
               )}
@@ -1023,7 +1011,7 @@ export function InventoryDetailPage() {
                     Created
                   </label>
                   <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                    {formatDate(
+                    {formatTimestamp(
                       viewingItem.created_at,
                       (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
                     )}
@@ -1039,7 +1027,7 @@ export function InventoryDetailPage() {
                     Updated
                   </label>
                   <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                    {formatDate(
+                    {formatTimestamp(
                       viewingItem.updated_at,
                       (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
                     )}

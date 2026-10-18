@@ -3,7 +3,7 @@ import { Modal } from './Modal';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
 import { authApi } from '@/services/api';
-import { formatDate, type DateFormatType } from '@/utils/dateFormat';
+import { formatTimestamp, type DateFormatType } from '@/utils/dateFormat';
 
 interface EditProfileModalProps {
   onClose: () => void;
@@ -165,7 +165,7 @@ export function EditProfileModal({ onClose }: EditProfileModalProps) {
           <label>Member Since</label>
           <input
             type="text"
-            value={formatDate(
+            value={formatTimestamp(
               user?.created_at,
               (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
             )}

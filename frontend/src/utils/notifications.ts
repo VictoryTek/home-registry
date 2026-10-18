@@ -4,6 +4,7 @@
  */
 
 import type { Item, DismissedWarranties } from '@/types';
+import { daysUntilDate } from './dateFormat';
 
 export interface WarrantyNotification {
   id: number;
@@ -28,7 +29,6 @@ export function checkWarrantyNotifications(
 ): WarrantyNotification[] {
   const notifications: WarrantyNotification[] = [];
   const now = new Date();
-  now.setHours(0, 0, 0, 0); // Set to start of day for accurate comparison
 
   items.forEach((item) => {
     if (!item.warranty_expiry || !item.id) {
@@ -45,11 +45,11 @@ export function checkWarrantyNotifications(
       // If warranty date changed, show notification again (user updated it)
     }
 
-    const expiryDate = new Date(item.warranty_expiry);
-    expiryDate.setHours(0, 0, 0, 0);
-
-    const diffTime = expiryDate.getTime() - now.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    // Calendar days from today: the expiry is a date with no time, so it is never turned into a Date
+    const diffDays = daysUntilDate(item.warranty_expiry, now);
+    if (diffDays === null) {
+      return; // Not a valid date
+    }
 
     // Determine status based on days until expiry
     let status: WarrantyNotification['status'];
@@ -105,4 +105,15 @@ export function getNotificationMessage(notification: WarrantyNotification): stri
   } else {
     return `${itemName} warranty expires in ${daysUntilExpiry} days`;
   }
+}
+
+/**
+ * Whether a warranty has expired. A warranty is valid through its expiry date and expired from
+ * the next day, the same rule `checkWarrantyNotifications` uses.
+ * @param warrantyExpiry - `YYYY-MM-DD` text from the API
+ * @param now - The current moment; only the tests pass this
+ */
+export function isWarrantyExpired(warrantyExpiry: string, now: Date = new Date()): boolean {
+  const days = daysUntilDate(warrantyExpiry, now);
+  return days !== null && days < 0;
 }

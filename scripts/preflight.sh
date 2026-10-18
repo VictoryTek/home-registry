@@ -116,6 +116,10 @@ if [ -d "frontend" ]; then
     (cd frontend && npm run format:check) || error "Prettier formatting check failed. Run: npm run format"
     success "Prettier formatting is correct"
 
+    section "FRONTEND: Unit Tests (every time zone)"
+    (cd frontend && npm test) || error "Frontend unit tests failed"
+    success "Frontend unit tests passed"
+
     section "FRONTEND: Build"
     (cd frontend && npm run build) || error "Frontend build failed"
     success "Frontend build passed"

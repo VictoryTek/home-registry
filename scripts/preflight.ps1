@@ -234,6 +234,19 @@ if (Test-Path "frontend") {
         Write-Error-Exit "Prettier check failed: $_"
     }
 
+    Write-Section "FRONTEND: Unit Tests (every time zone)"
+    try {
+        npm test
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-Error-Exit "Frontend unit tests failed. If the failure says a time zone was requested but not used, Node on this machine ignored the TZ variable; the run stops on purpose so it cannot report false passes. Run the tests in WSL or rely on CI."
+        }
+        Write-Success "Frontend unit tests passed"
+    } catch {
+        Pop-Location
+        Write-Error-Exit "Frontend unit tests failed: $_"
+    }
+
     Write-Section "FRONTEND: Build"
     try {
         npm run build

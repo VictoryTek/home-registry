@@ -1,5 +1,5 @@
 # CLAUDE.md
-**home-registry** — Full-stack self-hosted web application (Rust REST API backend + React/TypeScript SPA frontend). Languages: Rust (edition 2021, MSRV 1.88), TypeScript. Frameworks: actix-web 4 (backend), React 18 + Vite 6 (frontend). Package manager(s): Cargo (backend), npm (frontend — Node >=18, npm >=9).
+**home-registry** — Full-stack self-hosted web application (Rust REST API backend + React/TypeScript SPA frontend). Languages: Rust (edition 2021, MSRV 1.88), TypeScript. Frameworks: actix-web 4 (backend), React 18 + Vite 6 (frontend). Package manager(s): Cargo (backend), npm (frontend — Node >=20, npm >=9).
 
 ## Commands
 

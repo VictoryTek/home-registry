@@ -173,7 +173,9 @@ bash scripts/preflight.sh
 
 **Core (must install):**
 - Rust 1.75.0 or later
-- Node.js 18+ with npm 9+
+- Node.js 20+ with npm 9+ (`npm test` in `frontend/` runs the unit tests once per time zone with
+  `TZ` set for each run; it stops with an error if a zone does not take effect, for example on a
+  Windows machine whose Node ignores `TZ`. Use WSL or rely on CI there)
 - Docker
 
 **Optional (recommended for full local validation):**

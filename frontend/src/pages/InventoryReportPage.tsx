@@ -4,7 +4,7 @@ import { Header, LoadingState, EmptyState } from '@/components';
 import { reportApi, inventoryApi } from '@/services/api';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
-import { formatDate, type DateFormatType } from '@/utils/dateFormat';
+import { formatDateOnly, todayAsDateOnly, type DateFormatType } from '@/utils/dateFormat';
 import { formatCurrency, type CurrencyType } from '@/utils/currencyFormat';
 import type { InventoryReportData, InventoryReportParams, Inventory, Item } from '@/types';
 
@@ -95,7 +95,7 @@ export function InventoryReportPage() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `inventory_report_${inventory?.name ?? 'all'}_${new Date().toISOString().split('T')[0]}.csv`;
+      a.download = `inventory_report_${inventory?.name ?? 'all'}_${todayAsDateOnly()}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -469,7 +469,9 @@ export function InventoryReportPage() {
                             {formatCurrency(itemValue, currencyFormat)}
                           </td>
                           <td>
-                            {item.purchase_date ? formatDate(item.purchase_date, dateFormat) : '-'}
+                            {item.purchase_date
+                              ? formatDateOnly(item.purchase_date, dateFormat)
+                              : '-'}
                           </td>
                         </tr>
                       );

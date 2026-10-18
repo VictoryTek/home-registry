@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Header, EmptyState, LoadingState } from '@/components';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
-import { formatDate as formatDateUtil, type DateFormatType } from '@/utils/dateFormat';
+import { formatDateOnly, type DateFormatType } from '@/utils/dateFormat';
 import { getNotificationMessage } from '@/utils/notifications';
 import type { WarrantyNotification } from '@/utils/notifications';
 import '@/styles/notifications.css';
@@ -87,7 +87,7 @@ export function NotificationsPage() {
   const dateFormat = (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType;
 
   const formatDate = (dateStr: string): string => {
-    return formatDateUtil(dateStr, dateFormat);
+    return formatDateOnly(dateStr, dateFormat);
   };
 
   const getStatusIcon = (status: WarrantyNotification['status']): string => {
