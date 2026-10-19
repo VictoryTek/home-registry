@@ -5,13 +5,14 @@ mod report_csv;
 pub mod totp;
 
 use crate::db::report::{ReportError, ReportRequestError, ReportScope};
+use crate::db::search::{clean_term, resolve_limit, SearchRequestError, MAX_LIMIT};
 use crate::db::DatabaseService;
 use crate::models::{
     ApiResponse, CreateInventoryRequest, CreateItemRequest, CreateOrganizerOptionRequest,
     CreateOrganizerTypeRequest, EffectivePermissions, ErrorResponse, ImageUploadResponse,
-    InventoryReportData, InventoryReportRequest, SetItemOrganizerValuesRequest,
-    UpdateInventoryRequest, UpdateItemRequest, UpdateOrganizerOptionRequest,
-    UpdateOrganizerTypeRequest,
+    InventoryReportData, InventoryReportRequest, Item, ItemSearchRequest, ItemSearchResults,
+    SetItemOrganizerValuesRequest, UpdateInventoryRequest, UpdateItemRequest,
+    UpdateOrganizerOptionRequest, UpdateOrganizerTypeRequest,
 };
 use actix_multipart::form::{tempfile::TempFile, MultipartForm};
 use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse, Responder, Result, Scope};
@@ -687,52 +688,99 @@ pub async fn delete_item(
     }
 }
 
+/// A 400 for a search request, with fixed text: nothing the client sent is repeated.
+fn search_request_error(error: &SearchRequestError) -> HttpResponse {
+    let (what, message) = match error {
+        SearchRequestError::MissingTerm => (
+            "Search term required",
+            "A search term (q) of 1 to 100 characters is required",
+        ),
+        SearchRequestError::TermTooLong => (
+            "Search term too long",
+            "The search term can be at most 100 characters",
+        ),
+        SearchRequestError::ControlCharacters => (
+            "Invalid search term",
+            "The search term cannot contain control characters",
+        ),
+        SearchRequestError::BadLimit => ("Invalid limit", "limit must be 1 or more (at most 500)"),
+    };
+    report_bad_request(what, message)
+}
+
+/// Run a search for the signed-in user. The term is never logged.
+async fn run_item_search(
+    pool: &Pool,
+    http_req: &HttpRequest,
+    term: Option<&str>,
+    limit: Option<i64>,
+) -> std::result::Result<ItemSearchResults, HttpResponse> {
+    let auth = auth::get_auth_context_from_request(http_req, pool).await?;
+    let term = clean_term(term).map_err(|e| search_request_error(&e))?;
+    let limit = resolve_limit(limit).map_err(|e| search_request_error(&e))?;
+
+    let db_service = DatabaseService::new(pool.clone());
+    match db_service.search_items(auth.user_id, &term, limit).await {
+        Ok(found) => {
+            info!(
+                "Item search returned {} of {} matches",
+                found.results.len(),
+                found.total
+            );
+            Ok(found)
+        },
+        Err(e) => {
+            error!("Error searching items: {}", e);
+            Err(internal_error_response("Failed to search items"))
+        },
+    }
+}
+
+/// Search the items the caller can see: `?q=<text>&limit=<n>`.
+///
+/// Matches (ignoring case) the name, description, notes, legacy category and legacy location
+/// of an item and the option name or text of its select and text organizers. Name matches come
+/// first, then the newest. Each hit carries its inventory's name and the organizer values that
+/// matched. `limit` defaults to 100 and is lowered to 500; `total` counts every match.
+#[get("/items/search")]
+pub async fn search_items_by_term(
+    pool: web::Data<Pool>,
+    http_req: HttpRequest,
+    query: web::Query<ItemSearchRequest>,
+) -> Result<impl Responder> {
+    let query = query.into_inner();
+    match run_item_search(pool.get_ref(), &http_req, query.q.as_deref(), query.limit).await {
+        Ok(found) => Ok(HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: Some(format!("Found {} items", found.total)),
+            data: Some(found),
+            error: None,
+        })),
+        Err(response) => Ok(response),
+    }
+}
+
+/// **Deprecated:** use `GET /items/search?q=`. The term sits in the path, so it cannot contain a
+/// `/` (and the path appears in access logs). Same search and rules as the query form, but the
+/// answer is the plain list of items, at most 500.
 #[get("/items/search/{query}")]
 pub async fn search_items(
     pool: web::Data<Pool>,
     http_req: HttpRequest,
     path: web::Path<String>,
 ) -> Result<impl Responder> {
-    let auth = match auth::get_auth_context_from_request(&http_req, pool.get_ref()).await {
-        Ok(a) => a,
-        Err(e) => return Ok(e),
-    };
-    let query = path.into_inner();
-    let db_service = DatabaseService::new(pool.get_ref().clone());
-
-    let inventory_ids = match accessible_inventory_ids(&db_service, auth.user_id).await {
-        Ok(ids) => ids,
-        Err(resp) => return Ok(resp),
-    };
-
-    match db_service
-        .search_items_in_inventories(&inventory_ids, &query)
-        .await
-    {
-        Ok(items) => {
-            info!(
-                "Successfully searched items with query '{}', found {} results",
-                query,
-                items.len()
-            );
+    let term = path.into_inner();
+    match run_item_search(pool.get_ref(), &http_req, Some(&term), Some(MAX_LIMIT)).await {
+        Ok(found) => {
+            let items: Vec<Item> = found.results.into_iter().map(|hit| hit.item).collect();
             Ok(HttpResponse::Ok().json(ApiResponse {
                 success: true,
-                data: Some(items.clone()),
-                message: Some(format!(
-                    "Found {count} items matching '{query}'",
-                    count = items.len()
-                )),
+                message: Some(format!("Found {} items", items.len())),
+                data: Some(items),
                 error: None,
             }))
         },
-        Err(e) => {
-            error!("Error searching items: {}", e);
-            Ok(HttpResponse::InternalServerError().json(ErrorResponse {
-                success: false,
-                error: "An internal error occurred".to_string(),
-                message: Some("Failed to search items".to_string()),
-            }))
-        },
+        Err(response) => Ok(response),
     }
 }
 
@@ -1671,6 +1719,49 @@ pub async fn get_inventory_item_images(
     }
 }
 
+/// The select and text organizer values of every item in an inventory, for the detail page's
+/// filter and item cards. One row per value; see `InventoryOrganizerValue`.
+#[get("/inventories/{id}/organizer-values")]
+pub async fn get_inventory_organizer_values(
+    req: HttpRequest,
+    pool: web::Data<Pool>,
+    path: web::Path<i32>,
+) -> Result<impl Responder> {
+    let inventory_id = path.into_inner();
+    if let Err(resp) = authorize_inventory(pool.get_ref(), &req, inventory_id, Perm::View).await {
+        return Ok(resp);
+    }
+    let db_service = DatabaseService::new(pool.get_ref().clone());
+
+    match db_service
+        .get_inventory_organizer_values(inventory_id)
+        .await
+    {
+        Ok(values) => {
+            info!(
+                "Retrieved {} organizer values for inventory {}",
+                values.len(),
+                inventory_id
+            );
+            Ok(HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                message: Some(format!("Retrieved {} organizer values", values.len())),
+                data: Some(values),
+                error: None,
+            }))
+        },
+        Err(e) => {
+            error!(
+                "Error retrieving organizer values for inventory {}: {}",
+                inventory_id, e
+            );
+            Ok(internal_error_response(
+                "Failed to retrieve organizer values",
+            ))
+        },
+    }
+}
+
 // ==================== Inventory Reporting Endpoints ====================
 
 /// A 400 with a fixed message. Nothing the client sent is repeated in it.
@@ -2028,6 +2119,8 @@ pub fn api_scope() -> Scope {
         .service(update_inventory)
         .service(delete_inventory)
         // Item routes
+        // `/items/search` must come before `/items/{id}`, which would read "search" as an id
+        .service(search_items_by_term)
         .service(get_items)
         .service(get_item)
         .service(create_item)
@@ -2049,6 +2142,7 @@ pub fn api_scope() -> Scope {
         .service(upload_image)
         .service(delete_image)
         .service(get_inventory_item_images)
+        .service(get_inventory_organizer_values)
         // Inventory reporting routes
         .service(get_inventory_report)
         .service(get_inventory_statistics_endpoint)

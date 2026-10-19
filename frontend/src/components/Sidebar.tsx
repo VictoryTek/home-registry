@@ -1,4 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { SEARCH_TERM_MAX, normalizeTerm } from '@/utils/itemFilter';
 import { VersionDisplay } from './VersionDisplay';
 
 interface SidebarProps {
@@ -9,6 +11,30 @@ interface SidebarProps {
 }
 
 export function Sidebar({ currentPage, onNavigate, isOpen, onClose }: SidebarProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [params] = useSearchParams();
+  const [searchText, setSearchText] = useState('');
+
+  // On the search page the box shows the search that is being displayed
+  const onSearchPage = location.pathname === '/search';
+  const shownTerm = params.get('q') ?? '';
+  useEffect(() => {
+    if (onSearchPage) {
+      setSearchText(shownTerm);
+    }
+  }, [onSearchPage, shownTerm]);
+
+  const handleSearch = (event: FormEvent) => {
+    event.preventDefault();
+    const term = normalizeTerm(searchText);
+    if (term === '') {
+      return;
+    }
+    navigate(`/search?q=${encodeURIComponent(term)}`);
+    onClose(); // Auto-close sidebar on navigation (mobile)
+  };
+
   // Close sidebar on window resize above mobile breakpoint
   useEffect(() => {
     const handleResize = () => {
@@ -67,6 +93,24 @@ export function Sidebar({ currentPage, onNavigate, isOpen, onClose }: SidebarPro
         </div>
 
         <VersionDisplay />
+
+        <form className="sidebar-search" role="search" onSubmit={handleSearch}>
+          <label htmlFor="sidebar-search-input" className="visually-hidden">
+            Search all items
+          </label>
+          <input
+            id="sidebar-search-input"
+            type="search"
+            value={searchText}
+            maxLength={SEARCH_TERM_MAX}
+            placeholder="Search all items"
+            autoComplete="off"
+            onChange={(e) => setSearchText(e.target.value)}
+          />
+          <button type="submit" aria-label="Search">
+            <i className="fas fa-search" aria-hidden="true"></i>
+          </button>
+        </form>
 
         <nav className="nav-menu">
           <div className="nav-section">

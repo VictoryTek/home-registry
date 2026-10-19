@@ -9,3 +9,4 @@ export { RegisterPage } from './RegisterPage';
 export { ResetPasswordPage } from './ResetPasswordPage';
 export { RecoveryPage } from './RecoveryPage';
 export { NotificationsPage } from './NotificationsPage';
+export { SearchPage } from './SearchPage';

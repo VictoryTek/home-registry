@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Search, filter and sort for items (FEAT-F1, BUGS-BUG17).** An inventory page has a toolbar:
+  a search box (name, description, notes and organizer values), a sort menu (recently added,
+  name, price, purchase date, warranty expiry, either direction; items without a price or date
+  always come last), one dropdown per select organizer ("Any", each option, "No value"), removable
+  filter chips and a "Showing x of y" line. The choices live in the page address
+  (`?q=drill&sort=price&dir=desc&o=3:12`), so reload, back and shared links keep them. Item cards
+  show their organizer values (three, then "+N"). A search box in the sidebar opens a new
+  `/search?q=` page with matches from every inventory you can see, grouped by inventory, each
+  with the organizer value that matched; choosing one opens the item. API:
+  `GET /api/items/search?q=<text>&limit=<n>` returns `{results, total, limit}`: each result is the
+  item plus `inventory_name` and `matches` (`[{organizer, value}]`); name matches come first, then
+  the newest. `limit` defaults to 100 and is lowered to 500; `total` counts every match. The term
+  is trimmed, 1 to 100 characters, with no control characters (fixed 400 messages). It matches
+  organizer option names and text values too. New `GET /api/inventories/{id}/organizer-values`
+  returns the select and text values of every item in one call (view access).
 - **Organizer-aware reports (FEAT-F2, BUGS-BUG9).** The report page groups its breakdown by any
   select organizer of the inventory (the first one by default) instead of the legacy category
   column that nothing writes any more, and can filter by organizer, one dropdown per select
@@ -75,6 +90,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy's access log to see probes.
 
 ### Changed
+- **Deprecated: `GET /api/items/search/{query}`.** It still works and returns the same list of
+  items, but it is now the same search as `GET /api/items/search?q=` (so it also finds notes and
+  organizer values, lists name matches first, and returns at most 500 items). Because the term is
+  a path segment it cannot contain a `/` (BUG17), which the new route can; the term must be 1 to
+  100 characters (a fixed `400` otherwise); the response message no longer repeats the term
+  (`Found N items`), and the term is no longer written to the application log. Use `?q=`; the
+  path form will be removed in a later release.
 - **Breaking: the CSV export's "Category" and "Location" columns are replaced by one column per
   select or text organizer** (named after the organizer, so an inventory with a "Category"
   organizer still has a "Category" column, now filled in). The old columns read the legacy

@@ -1,6 +1,7 @@
 pub mod backup;
 mod registration;
 pub mod report;
+pub mod search;
 
 pub use registration::{InviteRegistration, PasswordReset};
 
@@ -173,33 +174,6 @@ impl DatabaseService {
                 "SELECT id, inventory_id, name, description, category, location, purchase_date::text, purchase_price::float8, warranty_expiry::text, notes, quantity, created_at, updated_at 
              FROM items WHERE inventory_id = ANY($1) ORDER BY created_at DESC",
                 &[&inventory_ids],
-            )
-            .await?;
-
-        Ok(rows.iter().map(item_from_row).collect())
-    }
-
-    /// Search items, restricted to the given inventories
-    pub async fn search_items_in_inventories(
-        &self,
-        inventory_ids: &[i32],
-        query: &str,
-    ) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
-        let client = self.pool.get().await?;
-
-        let escaped_query = escape_like_pattern(&query.to_lowercase());
-        let search_pattern = format!("%{escaped_query}%");
-        let rows = client
-            .query(
-                "SELECT id, inventory_id, name, description, category, location, purchase_date::text, purchase_price::float8, warranty_expiry::text, notes, quantity, created_at, updated_at 
-             FROM items 
-             WHERE inventory_id = ANY($2)
-               AND (LOWER(name) LIKE $1 ESCAPE '\\' 
-                OR LOWER(description) LIKE $1 ESCAPE '\\' 
-                OR LOWER(category) LIKE $1 ESCAPE '\\' 
-                OR LOWER(location) LIKE $1 ESCAPE '\\')
-             ORDER BY created_at DESC",
-                &[&search_pattern, &inventory_ids],
             )
             .await?;
 
@@ -478,53 +452,6 @@ impl DatabaseService {
             info!("Deleted item ID: {}", id);
         }
         Ok(deleted)
-    }
-
-    pub async fn search_items(&self, query: &str) -> Result<Vec<Item>, Box<dyn std::error::Error>> {
-        let client = self.pool.get().await?;
-
-        // Escape SQL LIKE wildcards to prevent pattern injection
-        let escaped_query = escape_like_pattern(&query.to_lowercase());
-        let search_pattern = format!("%{escaped_query}%");
-        let rows = client
-            .query(
-                "SELECT id, inventory_id, name, description, category, location, purchase_date::text, purchase_price::float8, warranty_expiry::text, notes, quantity, created_at, updated_at 
-             FROM items 
-             WHERE LOWER(name) LIKE $1 ESCAPE '\\' 
-                OR LOWER(description) LIKE $1 ESCAPE '\\' 
-                OR LOWER(category) LIKE $1 ESCAPE '\\' 
-                OR LOWER(location) LIKE $1 ESCAPE '\\'
-             ORDER BY created_at DESC",
-                &[&search_pattern],
-            )
-            .await?;
-
-        let mut items = Vec::new();
-        for row in rows {
-            let item = Item {
-                id: Some(row.get(0)),
-                inventory_id: row.get(1),
-                name: row.get(2),
-                description: row.get(3),
-                category: row.get(4),
-                location: row.get(5),
-                purchase_date: row.get::<_, Option<String>>(6),
-                purchase_price: row.get(7),
-                warranty_expiry: row.get::<_, Option<String>>(8),
-                notes: row.get(9),
-                quantity: row.get(10),
-                created_at: row.get::<_, Option<DateTime<Utc>>>(11),
-                updated_at: row.get::<_, Option<DateTime<Utc>>>(12),
-            };
-            items.push(item);
-        }
-
-        info!(
-            "Found {} items matching search query: '{}'",
-            items.len(),
-            query
-        );
-        Ok(items)
     }
 
     // Inventory operations

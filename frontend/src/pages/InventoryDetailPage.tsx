@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import {
   Header,
   LoadingState,
@@ -9,6 +9,7 @@ import {
   ShareInventoryModal,
   ImageLightbox,
   ImageOrganizerInput,
+  ItemFilterBar,
 } from '@/components';
 import { inventoryApi, itemApi, organizerApi, imageApi } from '@/services/api';
 import { useApp } from '@/context/AppContext';
@@ -17,6 +18,18 @@ import { formatDateOnly, formatTimestamp, type DateFormatType } from '@/utils/da
 import { formatCurrency, type CurrencyType } from '@/utils/currencyFormat';
 import { getNotificationMessage, isWarrantyExpired } from '@/utils/notifications';
 import { itemToEditFormData, toCreateItemRequest } from '@/utils/itemForm';
+import {
+  applyFilter,
+  cardChips,
+  indexOrganizerValues,
+  parseFilterParams,
+  pruneSelection,
+  writeFilterParams,
+  type ItemFilterState,
+} from '@/utils/itemFilter';
+
+/** Organizer values shown on one item card; the rest are counted as "+N". */
+const CARD_CHIPS_MAX = 3;
 import type {
   Inventory,
   Item,
@@ -25,6 +38,7 @@ import type {
   OrganizerTypeWithOptions,
   SetItemOrganizerValueRequest,
   ItemOrganizerValueWithDetails,
+  InventoryOrganizerValue,
 } from '@/types';
 
 export function InventoryDetailPage() {
@@ -37,6 +51,8 @@ export function InventoryDetailPage() {
   const [inventory, setInventory] = useState<Inventory | null>(null);
   const [items, setItems] = useState<Item[]>([]);
   const [organizers, setOrganizers] = useState<OrganizerTypeWithOptions[]>([]);
+  // The select and text organizer values of every item, for the filter and the item cards
+  const [organizerValueRows, setOrganizerValueRows] = useState<InventoryOrganizerValue[]>([]);
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
 
@@ -105,10 +121,12 @@ export function InventoryDetailPage() {
   const loadInventoryDetail = useCallback(async (inventoryId: number) => {
     setLoading(true);
     try {
-      const [invResult, itemsResult, organizersResult] = await Promise.all([
+      const [invResult, itemsResult, organizersResult, valuesResult] = await Promise.all([
         inventoryApi.getById(inventoryId),
         inventoryApi.getItems(inventoryId),
         organizerApi.getByInventory(inventoryId),
+        // Not essential: the page still works without it
+        inventoryApi.getOrganizerValues(inventoryId).catch(() => null),
       ]);
 
       if (invResult.success && invResult.data) {
@@ -122,6 +140,16 @@ export function InventoryDetailPage() {
       if (itemsResult.success && itemsResult.data) {
         setItems(itemsResult.data);
         setGlobalItems(itemsResult.data); // Update global items state for notifications
+      }
+
+      if (valuesResult?.success && valuesResult.data) {
+        setOrganizerValueRows(valuesResult.data);
+      } else {
+        setOrganizerValueRows([]);
+        showToast(
+          'Organizer values could not be loaded. Search and filters only cover the item details.',
+          'warning'
+        );
       }
 
       if (organizersResult.success && organizersResult.data) {
@@ -359,6 +387,29 @@ export function InventoryDetailPage() {
     }
   };
 
+  // Search, sort and organizer choices live in the page address, so a reload, the back button
+  // and a shared link keep them. `replace` keeps typing from filling the history.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filter = useMemo<ItemFilterState>(() => {
+    const parsed = parseFilterParams(searchParams);
+    // Choices of an organizer or option that is gone (or of another inventory) are ignored
+    return { ...parsed, organizers: pruneSelection(parsed.organizers, organizers) };
+  }, [searchParams, organizers]);
+  const handleFilterChange = useCallback(
+    (next: ItemFilterState) => {
+      setSearchParams((previous) => writeFilterParams(next, previous), { replace: true });
+    },
+    [setSearchParams]
+  );
+  const valuesByItem = useMemo(
+    () => indexOrganizerValues(organizerValueRows),
+    [organizerValueRows]
+  );
+  const visibleItems = useMemo(
+    () => applyFilter(items, valuesByItem, filter),
+    [items, valuesByItem, filter]
+  );
+
   const totalValue = items.reduce(
     (sum, item) => sum + (item.purchase_price ?? 0) * (item.quantity ?? 1),
     0
@@ -474,172 +525,224 @@ export function InventoryDetailPage() {
                 text="Start adding items to this inventory."
               />
             ) : (
-              <div className="items-grid">
-                {items.map((item) => {
-                  const itemValue = (item.purchase_price ?? 0) * (item.quantity ?? 1);
-                  const notification = getItemNotification(item.id);
-                  const thumbnailUrl = item.id ? itemImages[String(item.id)] : undefined;
-                  return (
-                    <div key={item.id} className="item-card">
-                      {/* Conditionally render thumbnail only if inventory has image organizer AND has images */}
-                      {shouldShowImageSection && (
-                        <div
-                          className="item-card-thumbnail"
-                          {...(thumbnailUrl
-                            ? {
-                                onClick: () => {
-                                  setLightboxUrl(thumbnailUrl);
-                                  setLightboxAlt(item.name);
-                                  setLightboxOpen(true);
-                                },
-                                role: 'button',
-                                tabIndex: 0,
-                                'aria-label': `View photo of ${item.name}`,
-                                onKeyDown: (e: React.KeyboardEvent) => {
-                                  if (e.key === 'Enter' || e.key === ' ') {
-                                    e.preventDefault();
+              <>
+                <ItemFilterBar
+                  filter={filter}
+                  organizers={organizers}
+                  shown={visibleItems.length}
+                  total={items.length}
+                  onChange={handleFilterChange}
+                />
+                {visibleItems.length === 0 && (
+                  <EmptyState
+                    icon="fas fa-filter"
+                    title="No Matching Items"
+                    text="No item matches the search and filters. Change them or clear them to see every item."
+                  />
+                )}
+                <div className="items-grid">
+                  {visibleItems.map((item) => {
+                    const itemValue = (item.purchase_price ?? 0) * (item.quantity ?? 1);
+                    const notification = getItemNotification(item.id);
+                    const thumbnailUrl = item.id ? itemImages[String(item.id)] : undefined;
+                    return (
+                      <div key={item.id} className="item-card">
+                        {/* Conditionally render thumbnail only if inventory has image organizer AND has images */}
+                        {shouldShowImageSection && (
+                          <div
+                            className="item-card-thumbnail"
+                            {...(thumbnailUrl
+                              ? {
+                                  onClick: () => {
                                     setLightboxUrl(thumbnailUrl);
                                     setLightboxAlt(item.name);
                                     setLightboxOpen(true);
-                                  }
-                                },
-                              }
-                            : {})}
-                        >
-                          {thumbnailUrl ? (
-                            <img src={thumbnailUrl} alt={item.name} loading="lazy" />
-                          ) : (
-                            <div className="item-card-placeholder" aria-label="No image available">
-                              <i className="fas fa-box-open" aria-hidden="true"></i>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <div className="item-card-header">
-                        <h3 className="item-card-title">{item.name}</h3>
-                        {item.category && (
-                          <span className="item-card-category">{item.category}</span>
-                        )}
-                      </div>
-                      <div className="item-card-body">
-                        {item.description && (
-                          <p className="item-card-description">{item.description}</p>
-                        )}
-                        <div className="item-card-details">
-                          {item.location && (
-                            <div className="detail-item">
-                              <i className="fas fa-map-marker-alt"></i>
-                              <span>{item.location}</span>
-                            </div>
-                          )}
-                          {item.quantity && (
-                            <div className="detail-item">
-                              <i className="fas fa-boxes"></i>
-                              <span>Qty: {item.quantity}</span>
-                            </div>
-                          )}
-                          {item.purchase_date && (
-                            <div className="detail-item">
-                              <i className="fas fa-calendar-alt"></i>
-                              <span>
-                                Purchased:{' '}
-                                {formatDateOnly(
-                                  item.purchase_date,
-                                  (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
-                                )}
-                              </span>
-                            </div>
-                          )}
-                          {item.purchase_price && (
-                            <div className="detail-item">
-                              <i className="fas fa-tag"></i>
-                              <span>
-                                {formatCurrency(
-                                  item.purchase_price,
-                                  (settings?.currency ?? 'USD') as CurrencyType
-                                )}{' '}
-                                ea
-                              </span>
-                            </div>
-                          )}
-                          {itemValue > 0 && (
-                            <div className="detail-item">
-                              <i className="fas fa-coins"></i>
-                              <span>
-                                Total:{' '}
-                                {formatCurrency(
-                                  itemValue,
-                                  (settings?.currency ?? 'USD') as CurrencyType
-                                )}
-                              </span>
-                            </div>
-                          )}
-                          {item.warranty_expiry && (
-                            <div className="detail-item">
-                              <i className="fas fa-shield-alt"></i>
-                              <span>
-                                Warranty:{' '}
-                                {formatDateOnly(
-                                  item.warranty_expiry,
-                                  (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
-                                )}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="item-card-footer">
-                        <button
-                          className="btn btn-sm btn-ghost"
-                          onClick={() => void handleViewItem(item)}
-                          title="View Details"
-                        >
-                          <i className="fas fa-eye"></i>
-                        </button>
-                        <button
-                          className="btn btn-sm btn-ghost"
-                          onClick={() => void handleOpenEditItem(item)}
-                          title="Edit Item"
-                        >
-                          <i className="fas fa-edit"></i>
-                        </button>
-                        <button
-                          className="btn btn-sm btn-ghost text-danger"
-                          onClick={() => openDeleteItemModal(item)}
-                          title="Delete Item"
-                        >
-                          <i className="fas fa-trash"></i>
-                        </button>
-                        {/* Enhancement 2: Notification Badge - moved to footer */}
-                        {notification &&
-                          (() => {
-                            const { status, daysUntilExpiry } = notification;
-                            const statusClass = `status-${status}`;
-                            const icon =
-                              status === 'expired'
-                                ? 'fa-exclamation-circle'
-                                : status === 'expiring-soon'
-                                  ? 'fa-exclamation-triangle'
-                                  : 'fa-info-circle';
-
-                            const text = status === 'expired' ? 'Expired' : `${daysUntilExpiry}d`;
-
-                            return (
-                              <span
-                                className={`item-notification-badge ${statusClass}`}
-                                title={getNotificationMessage(notification)}
-                                aria-label={`Warranty notification: ${getNotificationMessage(notification)}`}
+                                  },
+                                  role: 'button',
+                                  tabIndex: 0,
+                                  'aria-label': `View photo of ${item.name}`,
+                                  onKeyDown: (e: React.KeyboardEvent) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                      e.preventDefault();
+                                      setLightboxUrl(thumbnailUrl);
+                                      setLightboxAlt(item.name);
+                                      setLightboxOpen(true);
+                                    }
+                                  },
+                                }
+                              : {})}
+                          >
+                            {thumbnailUrl ? (
+                              <img src={thumbnailUrl} alt={item.name} loading="lazy" />
+                            ) : (
+                              <div
+                                className="item-card-placeholder"
+                                aria-label="No image available"
                               >
-                                <i className={`fas ${icon}`}></i>
-                                {text}
-                              </span>
+                                <i className="fas fa-box-open" aria-hidden="true"></i>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <div className="item-card-header">
+                          <h3 className="item-card-title">{item.name}</h3>
+                          {item.category && (
+                            <span className="item-card-category">{item.category}</span>
+                          )}
+                        </div>
+                        <div className="item-card-body">
+                          {item.description && (
+                            <p className="item-card-description">{item.description}</p>
+                          )}
+                          <div className="item-card-details">
+                            {item.location && (
+                              <div className="detail-item">
+                                <i className="fas fa-map-marker-alt"></i>
+                                <span>{item.location}</span>
+                              </div>
+                            )}
+                            {item.quantity && (
+                              <div className="detail-item">
+                                <i className="fas fa-boxes"></i>
+                                <span>Qty: {item.quantity}</span>
+                              </div>
+                            )}
+                            {item.purchase_date && (
+                              <div className="detail-item">
+                                <i className="fas fa-calendar-alt"></i>
+                                <span>
+                                  Purchased:{' '}
+                                  {formatDateOnly(
+                                    item.purchase_date,
+                                    (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
+                                  )}
+                                </span>
+                              </div>
+                            )}
+                            {item.purchase_price && (
+                              <div className="detail-item">
+                                <i className="fas fa-tag"></i>
+                                <span>
+                                  {formatCurrency(
+                                    item.purchase_price,
+                                    (settings?.currency ?? 'USD') as CurrencyType
+                                  )}{' '}
+                                  ea
+                                </span>
+                              </div>
+                            )}
+                            {itemValue > 0 && (
+                              <div className="detail-item">
+                                <i className="fas fa-coins"></i>
+                                <span>
+                                  Total:{' '}
+                                  {formatCurrency(
+                                    itemValue,
+                                    (settings?.currency ?? 'USD') as CurrencyType
+                                  )}
+                                </span>
+                              </div>
+                            )}
+                            {item.warranty_expiry && (
+                              <div className="detail-item">
+                                <i className="fas fa-shield-alt"></i>
+                                <span>
+                                  Warranty:{' '}
+                                  {formatDateOnly(
+                                    item.warranty_expiry,
+                                    (settings?.date_format ?? 'MM/DD/YYYY') as DateFormatType
+                                  )}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          {(() => {
+                            const { chips, more } = cardChips(
+                              item.id === undefined ? [] : (valuesByItem.get(item.id) ?? []),
+                              organizers,
+                              CARD_CHIPS_MAX
                             );
+                            return chips.length > 0 ? (
+                              <div
+                                className="item-chips"
+                                role="group"
+                                aria-label="Organizer values"
+                              >
+                                {chips.map((chip) => (
+                                  <span
+                                    className="item-chip"
+                                    key={chip.organizer}
+                                    title={`${chip.organizer}: ${chip.value}`}
+                                  >
+                                    <span className="item-chip-label">{chip.organizer}</span>
+                                    <span className="item-chip-value">{chip.value}</span>
+                                  </span>
+                                ))}
+                                {more > 0 && (
+                                  <span
+                                    className="item-chip item-chip-more"
+                                    title="Open the item to see all of its organizer values"
+                                  >
+                                    +{more}
+                                  </span>
+                                )}
+                              </div>
+                            ) : null;
                           })()}
+                        </div>
+                        <div className="item-card-footer">
+                          <button
+                            className="btn btn-sm btn-ghost"
+                            onClick={() => void handleViewItem(item)}
+                            title="View Details"
+                          >
+                            <i className="fas fa-eye"></i>
+                          </button>
+                          <button
+                            className="btn btn-sm btn-ghost"
+                            onClick={() => void handleOpenEditItem(item)}
+                            title="Edit Item"
+                          >
+                            <i className="fas fa-edit"></i>
+                          </button>
+                          <button
+                            className="btn btn-sm btn-ghost text-danger"
+                            onClick={() => openDeleteItemModal(item)}
+                            title="Delete Item"
+                          >
+                            <i className="fas fa-trash"></i>
+                          </button>
+                          {/* Enhancement 2: Notification Badge - moved to footer */}
+                          {notification &&
+                            (() => {
+                              const { status, daysUntilExpiry } = notification;
+                              const statusClass = `status-${status}`;
+                              const icon =
+                                status === 'expired'
+                                  ? 'fa-exclamation-circle'
+                                  : status === 'expiring-soon'
+                                    ? 'fa-exclamation-triangle'
+                                    : 'fa-info-circle';
+
+                              const text = status === 'expired' ? 'Expired' : `${daysUntilExpiry}d`;
+
+                              return (
+                                <span
+                                  className={`item-notification-badge ${statusClass}`}
+                                  title={getNotificationMessage(notification)}
+                                  aria-label={`Warranty notification: ${getNotificationMessage(notification)}`}
+                                >
+                                  <i className={`fas ${icon}`}></i>
+                                  {text}
+                                </span>
+                              );
+                            })()}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </div>
         </div>

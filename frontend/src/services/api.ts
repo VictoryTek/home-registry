@@ -16,6 +16,8 @@ import type {
   ItemOrganizerValueWithDetails,
   ItemOrganizerValue,
   SetItemOrganizerValuesRequest,
+  InventoryOrganizerValue,
+  ItemSearchResults,
   // Auth types
   User,
   UserSettings,
@@ -363,6 +365,15 @@ export const inventoryApi = {
     return handleResponse<Item[]>(response);
   },
 
+  /** The select and text organizer values of every item in the inventory, in one call. */
+  async getOrganizerValues(inventoryId: number): Promise<ApiResponse<InventoryOrganizerValue[]>> {
+    const response = await fetchWithRetry(
+      `${API_BASE}/inventories/${inventoryId}/organizer-values`,
+      { headers: getHeaders() }
+    );
+    return handleResponse<InventoryOrganizerValue[]>(response);
+  },
+
   async delete(id: number): Promise<ApiResponse<Record<string, never>>> {
     const response = await fetchWithRetry(`${API_BASE}/inventories/${id}`, {
       method: 'DELETE',
@@ -414,11 +425,16 @@ export const itemApi = {
     return handleResponse<boolean>(response);
   },
 
-  async search(query: string): Promise<ApiResponse<Item[]>> {
-    const response = await fetchWithRetry(`${API_BASE}/items/search/${encodeURIComponent(query)}`, {
+  /** Search the items the user can see. The term goes in `?q=`, so it can hold any character. */
+  async search(query: string, limit?: number): Promise<ApiResponse<ItemSearchResults>> {
+    const params = new URLSearchParams({ q: query });
+    if (limit !== undefined) {
+      params.set('limit', String(limit));
+    }
+    const response = await fetchWithRetry(`${API_BASE}/items/search?${params.toString()}`, {
       headers: getHeaders(),
     });
-    return handleResponse<Item[]>(response);
+    return handleResponse<ItemSearchResults>(response);
   },
 
   async getOrganizerValues(itemId: number): Promise<ApiResponse<ItemOrganizerValueWithDetails[]>> {

@@ -31,6 +31,49 @@ pub struct Item {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+/// Query of `GET /api/items/search`.
+#[derive(Deserialize, Debug)]
+pub struct ItemSearchRequest {
+    /// The text to look for (1 to 100 characters once trimmed)
+    pub q: Option<String>,
+    /// Most results to return (default 100, at most 500)
+    pub limit: Option<i64>,
+}
+
+/// An organizer value that matched a search, e.g. organizer `Brand`, value `Bosch`.
+#[derive(Serialize, Debug)]
+pub struct OrganizerMatch {
+    pub organizer: String,
+    pub value: String,
+}
+
+/// An item found by a search, with the inventory it is in and the organizer values that matched.
+#[derive(Serialize, Debug)]
+pub struct ItemSearchHit {
+    #[serde(flatten)]
+    pub item: Item,
+    pub inventory_name: String,
+    pub matches: Vec<OrganizerMatch>,
+}
+
+/// The answer of a search: at most `limit` hits, and how many items matched in all.
+#[derive(Serialize, Debug)]
+pub struct ItemSearchResults {
+    pub results: Vec<ItemSearchHit>,
+    pub total: i64,
+    pub limit: i64,
+}
+
+/// One organizer value of an item in the batch call for an inventory: `value` is the option's
+/// name for a select organizer (`organizer_option_id` set) or the text for a text organizer.
+#[derive(Serialize, Debug)]
+pub struct InventoryOrganizerValue {
+    pub item_id: i32,
+    pub organizer_type_id: i32,
+    pub organizer_option_id: Option<i32>,
+    pub value: String,
+}
+
 #[derive(Deserialize, Debug, Validate)]
 pub struct CreateInventoryRequest {
     #[validate(length(min = 1, max = 255, message = "Name must be 1-255 characters"))]

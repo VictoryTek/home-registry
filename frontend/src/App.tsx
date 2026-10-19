@@ -15,6 +15,7 @@ import {
   ResetPasswordPage,
   RecoveryPage,
   NotificationsPage,
+  SearchPage,
 } from '@/pages';
 import '@/styles/index.css';
 
@@ -59,6 +60,9 @@ function AppContent() {
     }
     if (location.pathname === '/notifications') {
       return 'notifications';
+    }
+    if (location.pathname === '/search') {
+      return 'search';
     }
     if (location.pathname.includes('/organizers')) {
       return 'organizers';
@@ -230,6 +234,14 @@ function AppContent() {
             element={
               <ProtectedRoute>
                 <NotificationsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/search"
+            element={
+              <ProtectedRoute>
+                <SearchPage />
               </ProtectedRoute>
             }
           />

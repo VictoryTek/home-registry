@@ -1,0 +1,103 @@
+{
+  "_comment": "Shared by tests/test_item_search.rs (the API) and src/utils/itemFilter.test.ts (the detail page filter). Both must find exactly the same items for every case. Values are keyed by organizer name. Image organizer values are never searched (the API leaves them out of the batch endpoint as well).",
+  "organizers": [
+    { "name": "Brand", "input_type": "select", "options": ["Bosch", "Makita", "50% Off"] },
+    { "name": "Serial", "input_type": "text" },
+    { "name": "Photo", "input_type": "image" }
+  ],
+  "items": [
+    {
+      "key": "drill",
+      "name": "Cordless Drill",
+      "description": "18V hammer drill",
+      "notes": null,
+      "category": "Power tools",
+      "location": null,
+      "values": { "Brand": "Bosch", "Serial": "SN-0042", "Photo": "/uploads/hidden-photo.png" }
+    },
+    {
+      "key": "saw",
+      "name": "Hand Saw",
+      "description": "Fine teeth, 100% steel",
+      "notes": "Lent to Maria",
+      "category": null,
+      "location": "Garage shelf",
+      "values": { "Brand": "Makita" }
+    },
+    {
+      "key": "sander",
+      "name": "Orbital Sander",
+      "description": "model_x2 sander",
+      "notes": null,
+      "category": null,
+      "location": null,
+      "values": { "Brand": "Bosch" }
+    },
+    {
+      "key": "backslash",
+      "name": "Path C:\\temp label",
+      "description": null,
+      "notes": null,
+      "category": null,
+      "location": null,
+      "values": {}
+    },
+    {
+      "key": "cafe",
+      "name": "Café Grinder",
+      "description": null,
+      "notes": null,
+      "category": null,
+      "location": null,
+      "values": {}
+    },
+    {
+      "key": "plain",
+      "name": "Notebook",
+      "description": "Nothing special",
+      "notes": null,
+      "category": null,
+      "location": null,
+      "values": { "Brand": "50% Off" }
+    },
+    {
+      "key": "sheet",
+      "name": "100% Cotton Sheet",
+      "description": null,
+      "notes": null,
+      "category": null,
+      "location": null,
+      "values": {}
+    }
+  ],
+  "cases": [
+    { "label": "name", "term": "drill", "expect": ["drill"] },
+    { "label": "upper case term", "term": "DRILL", "expect": ["drill"] },
+    { "label": "mixed case term", "term": "cOrDlEsS", "expect": ["drill"] },
+    { "label": "surrounding spaces are trimmed", "term": "  drill  ", "expect": ["drill"] },
+    { "label": "inner space is kept", "term": "hand saw", "expect": ["saw"] },
+    { "label": "description", "term": "hammer", "expect": ["drill"] },
+    { "label": "notes", "term": "lent to", "expect": ["saw"] },
+    { "label": "legacy category", "term": "power", "expect": ["drill"] },
+    { "label": "legacy location", "term": "garage", "expect": ["saw"] },
+    { "label": "select option name", "term": "bosch", "expect": ["drill", "sander"] },
+    { "label": "select option name, other case", "term": "MAKITA", "expect": ["saw"] },
+    { "label": "text value", "term": "sn-0042", "expect": ["drill"] },
+    { "label": "text value, part", "term": "sn-", "expect": ["drill"] },
+    { "label": "image value is not searched", "term": "hidden-photo", "expect": [] },
+    { "label": "image value, path part", "term": "uploads", "expect": [] },
+    { "label": "organizer name is not searched", "term": "brand", "expect": [] },
+    { "label": "percent in an option name", "term": "50%", "expect": ["plain"] },
+    { "label": "percent in a description and a name", "term": "100%", "expect": ["saw", "sheet"] },
+    { "label": "a lone percent is literal", "term": "%", "expect": ["saw", "sheet", "plain"] },
+    { "label": "a lone underscore is literal", "term": "_", "expect": ["sander"] },
+    { "label": "underscore is not one-character", "term": "dr_ll", "expect": [] },
+    { "label": "percent is not a wildcard", "term": "d%l", "expect": [] },
+    { "label": "a lone backslash is literal", "term": "\\", "expect": ["backslash"] },
+    { "label": "backslash then letter", "term": "\\temp", "expect": ["backslash"] },
+    { "label": "backslash does not escape a percent", "term": "\\%", "expect": [] },
+    { "label": "accented letters", "term": "CAFÉ", "expect": ["cafe"] },
+    { "label": "nothing matches", "term": "zzz-no-such-thing", "expect": [] },
+    { "label": "quote characters", "term": "'; DROP TABLE items; --", "expect": [] }
+  ]
+}

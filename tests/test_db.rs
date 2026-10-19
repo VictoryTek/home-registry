@@ -554,12 +554,29 @@ async fn test_search_items() {
         .await
         .expect("Failed to create item");
 
-    let results = db
-        .search_items(&unique_name)
+    let found = db
+        .search_items(user.id, &unique_name, 100)
         .await
         .expect("Failed to search items");
 
-    assert!(results.iter().any(|item| item.id == Some(item_id)));
+    assert!(found.results.iter().any(|hit| hit.item.id == Some(item_id)));
+    assert_eq!(found.total, 1);
+
+    // Someone without access to the inventory finds nothing
+    let other = common::test_username("db_item_search_other");
+    common::create_test_user(&pool, &other).await;
+    let other_user = db
+        .get_user_by_username(&other)
+        .await
+        .expect("Failed to get user")
+        .expect("User not found");
+    let found = db
+        .search_items(other_user.id, &unique_name, 100)
+        .await
+        .expect("Failed to search items");
+    assert!(found.results.is_empty());
+    assert_eq!(found.total, 0);
+    common::delete_test_user(&pool, &other).await.ok();
 
     // Cleanup
     common::delete_test_item(&pool, item_id).await.ok();

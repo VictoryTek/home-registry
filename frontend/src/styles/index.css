@@ -10,6 +10,7 @@
 @import './auth.css';
 @import './instructions.css';
 @import './lightbox.css';
+@import './item-search.css';
 
 /* Loading Screen */
 .loading-screen {

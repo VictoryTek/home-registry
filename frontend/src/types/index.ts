@@ -162,6 +162,36 @@ export interface OrganizerTypeWithOptions extends OrganizerType {
   options: OrganizerOption[];
 }
 
+/** An organizer value that matched a search, e.g. organizer `Brand`, value `Bosch`. */
+export interface OrganizerMatch {
+  organizer: string;
+  value: string;
+}
+
+/** An item found by `GET /items/search`, with its inventory and the organizer values that matched. */
+export interface ItemSearchHit extends Item {
+  inventory_name: string;
+  matches: OrganizerMatch[];
+}
+
+export interface ItemSearchResults {
+  results: ItemSearchHit[];
+  /** How many items matched in all; `results` holds at most `limit` of them. */
+  total: number;
+  limit: number;
+}
+
+/**
+ * One select or text value of an item, from `GET /inventories/{id}/organizer-values`: `value` is
+ * the option's name for a select organizer or the text for a text organizer.
+ */
+export interface InventoryOrganizerValue {
+  item_id: number;
+  organizer_type_id: number;
+  organizer_option_id: number | null;
+  value: string;
+}
+
 export interface ItemOrganizerValue {
   id?: number;
   item_id: number;
