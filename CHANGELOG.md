@@ -49,11 +49,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `audit`) record the acting user and the objects, never a token.
 
 ### Fixed
+- **A request that creates or changes data is no longer sent again after a network error.** The
+  web client retried every request when the connection failed, so if the server had already
+  handled a POST (a new item, a registration, a reset link) and only the answer was lost, the
+  retry could do it twice or report a used link as invalid. Network errors are now retried only
+  for GET, HEAD, PUT, DELETE and OPTIONS; a POST or PATCH reports the failure. Rate-limited
+  (429) requests and a request refused with an outdated token are still retried for every
+  method, since the server did not run them.
+- **Restoring a backup no longer changes who may register.** The registration mode used to come
+  back with the backup, so restoring one taken while registration was open reopened it. A
+  restore now keeps the current mode (a server that never had one chosen stays invite only).
+  The mode is no longer part of what a restore replaces; it is still included in backups.
+- **Item search details.** An item without a creation time is listed after the others in a
+  search, as the page's sort does. A byte order mark (U+FEFF) at either end of a search term is
+  trimmed by the API as it is by the page. "Clear all" on the inventory page no longer lets text
+  typed a moment earlier come back into the search box, and the sidebar search form has an
+  accessible name.
 - **Reports filtered by a date no longer fail.** `from_date` and `to_date` were sent to the
   database as text for a `date` comparison, which the driver refuses, so any report with a date
   filter answered `500`. The statistics and category endpoints now validate their parameters like
   the report does (an invalid date used to reach the database), and the report endpoints no
   longer put raw database error text in their responses.
+- **Report dates outside the years 1 to 9999 are refused with a `400`.** A date such as
+  `99999-01-01` or `-4800-01-01` passed the date parser and then failed in the database, which
+  answered `500`. The message is the same fixed "Date must be in ISO 8601 format" sentence and
+  does not repeat the date.
+- **The report page recovers when an organizer was deleted while it was open.** A filter or
+  grouping on a deleted organizer made every request fail with a 400 and left the old data on
+  screen. The page now reloads the organizers once, drops the choices that are gone and asks
+  again; if that does not help it shows the error instead of retrying.
+- **Report page.** With filters that match nothing, the breakdown now says "No items match the
+  current filters." (it asked for an organizer when the inventory had no select organizer), and
+  an empty inventory says "This inventory has no items yet.". An item without a price shows `-`
+  as its total value, as the CSV leaves it blank, instead of `0`. Moving from one inventory's
+  report to another's through the browser history starts fresh instead of asking for the old
+  inventory's report.
 - **The report's "Average Price" card showed nothing useful** (the page read `average_price`, the
   API sends `average_item_value`). The average is over the items that have a price.
 - **Report statistics and breakdown ignored the filters.** They covered the whole inventory next
@@ -90,6 +120,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy's access log to see probes.
 
 ### Changed
+- **The Docker image's package updates are refreshed at least daily.** The runtime stage already
+  ran `apk upgrade`, but Docker reused that cached layer for weeks, so an image kept an old
+  `curl` with known HIGH vulnerabilities (found by the Trivy step of the preflight). The
+  Dockerfile now takes an `APK_CACHE_BUST` build argument before that layer; `scripts/preflight.sh`,
+  `scripts/preflight.ps1`, the CI Docker job and the release workflow pass today's date (UTC),
+  and the preflight builds with `--pull`, so base images are refreshed too. A build without the
+  argument still works (it uses `unset`). Set `APK_CACHE_BUST` in the environment to force a
+  refresh in the preflight.
 - **Deprecated: `GET /api/items/search/{query}`.** It still works and returns the same list of
   items, but it is now the same search as `GET /api/items/search?q=` (so it also finds notes and
   organizer values, lists name matches first, and returns at most 500 items). Because the term is

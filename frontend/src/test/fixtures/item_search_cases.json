@@ -75,6 +75,11 @@
     { "label": "upper case term", "term": "DRILL", "expect": ["drill"] },
     { "label": "mixed case term", "term": "cOrDlEsS", "expect": ["drill"] },
     { "label": "surrounding spaces are trimmed", "term": "  drill  ", "expect": ["drill"] },
+    {
+      "label": "a byte order mark at either end is trimmed",
+      "term": "\ufeffdrill\ufeff",
+      "expect": ["drill"]
+    },
     { "label": "inner space is kept", "term": "hand saw", "expect": ["saw"] },
     { "label": "description", "term": "hammer", "expect": ["drill"] },
     { "label": "notes", "term": "lent to", "expect": ["saw"] },

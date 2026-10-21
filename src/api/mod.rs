@@ -1830,7 +1830,12 @@ async fn prepare_report(
     let parse_date =
         |value: &Option<String>, name: &str| -> std::result::Result<(), HttpResponse> {
             match value {
-                Some(text) if chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").is_err() => {
+                // Years 1 to 9999 only: the parser also takes years the database cannot store,
+                // and those used to come back as a 500
+                Some(text)
+                    if !chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                        .is_ok_and(|date| (1..=9999).contains(&chrono::Datelike::year(&date))) =>
+                {
                     Err(report_bad_request(
                         &format!("Invalid {name} format"),
                         "Date must be in ISO 8601 format (YYYY-MM-DD)",

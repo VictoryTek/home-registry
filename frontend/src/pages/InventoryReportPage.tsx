@@ -1,15 +1,21 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Header, LoadingState, EmptyState } from '@/components';
+import { pruneSelection } from '@/utils/itemFilter';
 import { reportApi, inventoryApi, organizerApi } from '@/services/api';
 import { useApp } from '@/context/AppContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatDateOnly, todayAsDateOnly, type DateFormatType } from '@/utils/dateFormat';
 import { formatCurrency, type CurrencyType } from '@/utils/currencyFormat';
 import {
+  breakdownNotice,
   defaultGroupBy,
   encodeOrganizerFilters,
+  isStaleOrganizerError,
+  itemTotalValue,
+  keepGroupBy,
   roundShares,
+  shouldRecoverFromStaleOrganizers,
   type OrganizerSelection,
 } from '@/utils/reportQuery';
 import type {
@@ -26,7 +32,17 @@ interface AppliedFilters {
   selection: OrganizerSelection;
 }
 
+/**
+ * The report of the inventory in the address. Keyed by the inventory, so going from one
+ * inventory's report to another's (browser history can) starts with fresh filters and data
+ * instead of asking for the old inventory's report.
+ */
 export function InventoryReportPage() {
+  const { id } = useParams<{ id: string }>();
+  return <InventoryReport key={id} />;
+}
+
+function InventoryReport() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { showToast } = useApp();
@@ -46,6 +62,8 @@ export function InventoryReportPage() {
   const [showFilters, setShowFilters] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const latestRequest = useRef(0);
+  // Set while the report is failing because an organizer was deleted and we already reloaded once
+  const reloadedForStaleOrganizers = useRef(false);
 
   // The inventory's organizers decide how the report can be grouped and filtered
   useEffect(() => {
@@ -111,8 +129,41 @@ export function InventoryReportPage() {
 
       if (reportResult.success && reportResult.data) {
         setReportData(reportResult.data);
+        reloadedForStaleOrganizers.current = false;
+      } else if (
+        shouldRecoverFromStaleOrganizers(reportResult.error, reloadedForStaleOrganizers.current)
+      ) {
+        // An organizer the page still offers was deleted (maybe in another tab). Reload the
+        // organizers once and drop the choices that are gone; the changed state asks again. If
+        // that does not cure it, the next failure is shown (the flag stays set), so no loop.
+        reloadedForStaleOrganizers.current = true;
+        const fresh = await organizerApi.getByInventory(parseInt(id, 10));
+        if (request !== latestRequest.current) {
+          return;
+        }
+        if (fresh.success && fresh.data) {
+          const list = fresh.data;
+          setOrganizers(list);
+          setSelection((previous) => pruneSelection(previous, list));
+          setApplied((previous) => ({
+            filters: previous.filters,
+            selection: pruneSelection(previous.selection, list),
+          }));
+          setGroupBy((previous) => keepGroupBy(previous, list));
+          showToast(
+            'An organizer used by this report was removed. The report was refreshed.',
+            'warning'
+          );
+        } else {
+          showToast(reportResult.error ?? 'Failed to load report', 'error');
+        }
       } else {
-        showToast(reportResult.error ?? 'Failed to load report', 'error');
+        showToast(
+          isStaleOrganizerError(reportResult.error)
+            ? 'The report could not be refreshed. Reload the page.'
+            : (reportResult.error ?? 'Failed to load report'),
+          'error'
+        );
       }
     } catch {
       if (request === latestRequest.current) {
@@ -211,9 +262,6 @@ export function InventoryReportPage() {
   const showLegacyCategory = items.some((item) => item.category);
   const showLegacyLocation = items.some((item) => item.location);
 
-  // The legacy breakdown (no organizer chosen) says nothing when it is all "Uncategorized"
-  const breakdownIsEmpty =
-    !grouping && category_breakdown.every((group) => group.category === 'Uncategorized');
   const shares = roundShares(category_breakdown.map((group) => group.percentage_of_total));
 
   // Check if any filters are active
@@ -223,6 +271,15 @@ export function InventoryReportPage() {
     applied.filters.min_price !== undefined ||
     applied.filters.max_price !== undefined ||
     encodeOrganizerFilters(applied.selection) !== undefined;
+
+  // What to say instead of the breakdown table, if it has nothing to show
+  const breakdownMessage = breakdownNotice({
+    groupCount: category_breakdown.length,
+    grouped: grouping !== undefined && grouping !== null,
+    onlyUncategorized: category_breakdown.every((group) => group.category === 'Uncategorized'),
+    selectOrganizerCount: selectOrganizers.length,
+    hasActiveFilters,
+  });
 
   return (
     <>
@@ -508,14 +565,8 @@ export function InventoryReportPage() {
               )}
             </div>
 
-            {breakdownIsEmpty ? (
-              <p style={{ color: 'var(--text-muted)' }}>
-                {selectOrganizers.length === 0
-                  ? 'Add a select organizer (for example "Category") to this inventory to see a breakdown of its items.'
-                  : 'Choose an organizer to group by.'}
-              </p>
-            ) : category_breakdown.length === 0 ? (
-              <p style={{ color: 'var(--text-muted)' }}>No items match the current filters.</p>
+            {breakdownMessage !== null ? (
+              <p style={{ color: 'var(--text-muted)' }}>{breakdownMessage}</p>
             ) : (
               <div className="table-container">
                 <table className="table">
@@ -579,7 +630,7 @@ export function InventoryReportPage() {
                   </thead>
                   <tbody>
                     {items.map((item: ReportItem) => {
-                      const itemValue = (item.purchase_price ?? 0) * (item.quantity ?? 1);
+                      const itemValue = itemTotalValue(item);
                       return (
                         <tr key={item.id}>
                           <td>
@@ -617,7 +668,7 @@ export function InventoryReportPage() {
                               : '-'}
                           </td>
                           <td style={{ textAlign: 'right' }}>
-                            {formatCurrency(itemValue, currencyFormat)}
+                            {itemValue === null ? '-' : formatCurrency(itemValue, currencyFormat)}
                           </td>
                           <td>
                             {item.purchase_date

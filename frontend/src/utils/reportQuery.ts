@@ -60,3 +60,68 @@ export function roundShares(values: number[], decimals = 1): number[] {
   }
   return result.map((v) => v / scale);
 }
+
+/**
+ * The total value of a report row: price times quantity (a missing quantity counts as 1), or
+ * null when the item has no price, which the CSV leaves blank as well.
+ */
+export function itemTotalValue(item: {
+  purchase_price?: number;
+  quantity?: number;
+}): number | null {
+  return typeof item.purchase_price === 'number'
+    ? item.purchase_price * (item.quantity ?? 1)
+    : null;
+}
+
+/**
+ * What to say instead of the breakdown table, or null when the table should be shown. The legacy
+ * breakdown (no organizer chosen) says nothing when every item is "Uncategorized".
+ */
+export function breakdownNotice(input: {
+  groupCount: number;
+  grouped: boolean;
+  onlyUncategorized: boolean;
+  selectOrganizerCount: number;
+  hasActiveFilters: boolean;
+}): string | null {
+  if (input.groupCount === 0) {
+    return input.hasActiveFilters
+      ? 'No items match the current filters.'
+      : 'This inventory has no items yet.';
+  }
+  if (!input.grouped && input.onlyUncategorized) {
+    return input.selectOrganizerCount === 0
+      ? 'Add a select organizer (for example "Category") to this inventory to see a breakdown of its items.'
+      : 'Choose an organizer to group by.';
+  }
+  return null;
+}
+
+/** The `error` texts the report API answers with for an organizer or option the inventory lacks. */
+const STALE_ORGANIZER_ERRORS = ['Unknown organizer or option', 'Not a select organizer'];
+
+/** Whether a report failed because it named an organizer that has been deleted or changed. */
+export function isStaleOrganizerError(error: string | undefined): boolean {
+  return error !== undefined && STALE_ORGANIZER_ERRORS.includes(error);
+}
+
+/**
+ * Whether to reload the organizers and ask again. Only once per failure: if the reload did not
+ * cure it (`alreadyTried`), the error is shown instead, so the page cannot loop.
+ */
+export function shouldRecoverFromStaleOrganizers(
+  error: string | undefined,
+  alreadyTried: boolean
+): boolean {
+  return isStaleOrganizerError(error) && !alreadyTried;
+}
+
+/** The grouping to keep after the organizers changed: the same one if it still exists, else the default. */
+export function keepGroupBy(
+  groupBy: number | undefined,
+  organizers: OrganizerTypeWithOptions[]
+): number | undefined {
+  const stillThere = organizers.some((o) => o.id === groupBy && o.input_type === 'select');
+  return stillThere ? groupBy : defaultGroupBy(organizers);
+}

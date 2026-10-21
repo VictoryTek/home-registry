@@ -432,6 +432,55 @@ async fn name_matches_come_first_then_newest_then_the_higher_id() {
 }
 
 #[actix_web::test]
+async fn an_item_without_a_creation_time_comes_after_the_others() {
+    home_registry::auth::get_or_init_jwt_secret();
+    let scratch = ScratchDb::create().await;
+    let pool = scratch.pool.clone();
+    let (owner, token) = user(&pool, "owner").await;
+    let inv = common::create_test_inventory(&pool, owner, "Home")
+        .await
+        .unwrap();
+    // items.created_at is nullable. The client sorts a missing time last; so must the search.
+    let undated = item(&pool, inv, "Lamp undated", "").await;
+    let old = item(&pool, inv, "Lamp old", "").await;
+    let new = item(&pool, inv, "Lamp new", "").await;
+    let described = item(&pool, inv, "Shade", "a lamp shade").await;
+    exec(
+        &pool,
+        "UPDATE items SET created_at = NULL WHERE id = $1",
+        &[&undated],
+    )
+    .await;
+    exec(
+        &pool,
+        "UPDATE items SET created_at = '2020-01-01T00:00:00Z' WHERE id = $1",
+        &[&old],
+    )
+    .await;
+    exec(
+        &pool,
+        "UPDATE items SET created_at = '2024-01-01T00:00:00Z' WHERE id = $1",
+        &[&new],
+    )
+    .await;
+    exec(
+        &pool,
+        "UPDATE items SET created_at = '2023-01-01T00:00:00Z' WHERE id = $1",
+        &[&described],
+    )
+    .await;
+    let app = app!(pool);
+
+    let (status, json, _) = get!(&app, "/api/items/search?q=lamp", Some(&token));
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(
+        result_ids(&json),
+        vec![new, old, undated, described],
+        "name matches newest first with the undated one last, then the other matches"
+    );
+}
+
+#[actix_web::test]
 async fn the_limit_caps_the_list_but_total_counts_everything() {
     home_registry::auth::get_or_init_jwt_secret();
     let scratch = ScratchDb::create().await;

@@ -94,7 +94,12 @@ export function Sidebar({ currentPage, onNavigate, isOpen, onClose }: SidebarPro
 
         <VersionDisplay />
 
-        <form className="sidebar-search" role="search" onSubmit={handleSearch}>
+        <form
+          className="sidebar-search"
+          role="search"
+          aria-label="Search all items"
+          onSubmit={handleSearch}
+        >
           <label htmlFor="sidebar-search-input" className="visually-hidden">
             Search all items
           </label>

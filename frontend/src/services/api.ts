@@ -225,9 +225,20 @@ function parseRetryAfter(response: Response): number | null {
 }
 
 /**
+ * Whether a request may be sent again after a network error, when it is not known whether the
+ * server received it. Only methods whose repetition changes nothing are: a repeated POST or PATCH
+ * could create a second item or apply a change twice. (A 429 or an outdated token is different:
+ * the server refused the request, so any method is retried.)
+ */
+export function retriesAfterNetworkError(method: string | undefined): boolean {
+  return ['GET', 'HEAD', 'PUT', 'DELETE', 'OPTIONS'].includes((method ?? 'GET').toUpperCase());
+}
+
+/**
  * Fetch with automatic retry logic for rate limiting and transient errors
  *
  * Implements:
+ * - Network errors are retried only for requests that are safe to repeat (not POST or PATCH)
  * - Exponential backoff (1s, 2s, 4s, 8s, 16s)
  * - Retry-After header parsing for rate limits
  * - Jitter to prevent thundering herd
@@ -238,7 +249,7 @@ function parseRetryAfter(response: Response): number | null {
  * @param maxRetries - Maximum number of retries (default: 5)
  * @returns Response object
  */
-async function fetchWithRetry(
+export async function fetchWithRetry(
   url: string,
   options: RequestInit,
   maxRetries = 5
@@ -303,6 +314,13 @@ async function fetchWithRetry(
     } catch (error) {
       // Network error or fetch failed
       lastError = error as Error;
+
+      if (!retriesAfterNetworkError(init.method)) {
+        // The server may have handled it before the connection broke: repeating it could do
+        // it twice, so report the failure instead
+        console.error('Request failed (not repeated, it is not safe to repeat):', lastError);
+        throw lastError;
+      }
 
       if (attempt === maxRetries) {
         // Last attempt - throw the error

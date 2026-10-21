@@ -400,6 +400,21 @@ impl DatabaseService {
             .map(|r| (r.get(0), r.get(1)))
             .collect();
 
+        // Who may register is a decision about this server, not part of the data: a backup taken
+        // while registration was open must not reopen it. Remember the current setting (None when
+        // none was ever chosen) and put it back after the restore.
+        let has_settings = db_tables.iter().any(|t| t == "app_settings");
+        let registration_mode: Option<(String, chrono::DateTime<chrono::Utc>)> = if has_settings {
+            tx.query_opt(
+                "SELECT value, updated_at FROM app_settings WHERE key = 'registration_mode'",
+                &[],
+            )
+            .await?
+            .map(|row| (row.get(0), row.get(1)))
+        } else {
+            None
+        };
+
         // One statement empties every table; no CASCADE is needed because all are listed
         if !db_tables.is_empty() {
             let list = db_tables
@@ -523,6 +538,29 @@ impl DatabaseService {
         )
         .await?;
         report.sessions_ended = true;
+
+        if has_settings {
+            match &registration_mode {
+                Some((mode, updated_at)) => {
+                    tx.execute(
+                        "INSERT INTO app_settings (key, value, updated_at)
+                         VALUES ('registration_mode', $1, $2)
+                         ON CONFLICT (key) DO UPDATE
+                         SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
+                        &[mode, updated_at],
+                    )
+                    .await?;
+                },
+                // Never chosen here: the default (invite only) applies, not the backup's value
+                None => {
+                    tx.execute(
+                        "DELETE FROM app_settings WHERE key = 'registration_mode'",
+                        &[],
+                    )
+                    .await?;
+                },
+            }
+        }
 
         // A backup must never make an invitation or reset link redeemable again. Whatever the file
         // holds as unused may have been used or revoked since it was taken, so all of it is revoked.

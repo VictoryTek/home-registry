@@ -47,7 +47,11 @@ pub enum SearchRequestError {
 /// # Errors
 /// [`SearchRequestError`] for a term that is missing, too long or holds control characters.
 pub fn clean_term(raw: Option<&str>) -> Result<String, SearchRequestError> {
-    let term = raw.unwrap_or_default().trim();
+    // A byte order mark is trimmed like white space: the page's JavaScript `trim()` does, Rust's
+    // does not, and both must find the same items
+    let term = raw
+        .unwrap_or_default()
+        .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     if term.is_empty() {
         return Err(SearchRequestError::MissingTerm);
     }
@@ -110,7 +114,7 @@ WHERE i.inventory_id IN (SELECT inventory_id FROM access)
     OR LOWER(i.category) LIKE $1 ESCAPE '\\'
     OR LOWER(i.location) LIKE $1 ESCAPE '\\'
     OR m.item_id IS NOT NULL)
-ORDER BY (LOWER(i.name) LIKE $1 ESCAPE '\\') DESC, i.created_at DESC, i.id DESC
+ORDER BY (LOWER(i.name) LIKE $1 ESCAPE '\\') DESC, i.created_at DESC NULLS LAST, i.id DESC
 LIMIT $3";
 
 impl DatabaseService {
@@ -206,6 +210,25 @@ mod tests {
         for blank in [None, Some(""), Some("   "), Some("\t\n"), Some("\u{a0}")] {
             assert_eq!(clean_term(blank), Err(SearchRequestError::MissingTerm));
         }
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_trimmed_like_white_space() {
+        // JavaScript's trim() removes U+FEFF; Rust's does not, and the page and the API must agree
+        assert_eq!(
+            clean_term(Some("\u{feff}drill\u{feff}")).as_deref(),
+            Ok("drill")
+        );
+        assert_eq!(
+            clean_term(Some(" \u{feff} drill \u{feff} ")).as_deref(),
+            Ok("drill")
+        );
+        assert_eq!(
+            clean_term(Some("\u{feff}")),
+            Err(SearchRequestError::MissingTerm)
+        );
+        // Only at the ends: inside the term it is ordinary text, as in the page
+        assert_eq!(clean_term(Some("a\u{feff}b")).as_deref(), Ok("a\u{feff}b"));
     }
 
     #[test]

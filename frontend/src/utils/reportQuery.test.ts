@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { OrganizerTypeWithOptions } from '@/types';
-import { defaultGroupBy, encodeOrganizerFilters, roundShares } from './reportQuery';
+import {
+  breakdownNotice,
+  defaultGroupBy,
+  encodeOrganizerFilters,
+  isStaleOrganizerError,
+  itemTotalValue,
+  keepGroupBy,
+  roundShares,
+  shouldRecoverFromStaleOrganizers,
+} from './reportQuery';
 
 function organizer(
   id: number | undefined,
@@ -109,5 +118,96 @@ describe('rounding shares', () => {
       const equal = Array.from({ length: n }, () => 100 / n);
       expect(sum(roundShares(equal))).toBe(100);
     }
+  });
+});
+
+describe('the total value of an item row', () => {
+  it('is price times quantity, with a missing quantity counted as 1', () => {
+    expect(itemTotalValue({ purchase_price: 10, quantity: 3 })).toBe(30);
+    expect(itemTotalValue({ purchase_price: 10 })).toBe(10);
+    expect(itemTotalValue({ purchase_price: 0, quantity: 5 })).toBe(0);
+  });
+
+  it('is nothing for an item without a price, as in the CSV, not 0', () => {
+    expect(itemTotalValue({})).toBeNull();
+    expect(itemTotalValue({ quantity: 4 })).toBeNull();
+    expect(itemTotalValue({ purchase_price: undefined, quantity: 2 })).toBeNull();
+  });
+});
+
+describe('what an empty breakdown says', () => {
+  const base = {
+    groupCount: 0,
+    grouped: false,
+    onlyUncategorized: true,
+    selectOrganizerCount: 0,
+    hasActiveFilters: false,
+  };
+
+  it('says no item matches when filters leave nothing, whatever organizers exist', () => {
+    for (const selectOrganizerCount of [0, 2]) {
+      for (const grouped of [true, false]) {
+        expect(
+          breakdownNotice({ ...base, selectOrganizerCount, grouped, hasActiveFilters: true })
+        ).toBe('No items match the current filters.');
+      }
+    }
+  });
+
+  it('says the inventory is empty when there are no items and no filters', () => {
+    expect(breakdownNotice(base)).toBe('This inventory has no items yet.');
+  });
+
+  it('asks for an organizer only when the legacy breakdown has nothing to show', () => {
+    const legacy = { ...base, groupCount: 1 };
+    expect(breakdownNotice(legacy)).toBe(
+      'Add a select organizer (for example "Category") to this inventory to see a breakdown of its items.'
+    );
+    expect(breakdownNotice({ ...legacy, selectOrganizerCount: 2 })).toBe(
+      'Choose an organizer to group by.'
+    );
+  });
+
+  it('shows the table when there are groups worth showing', () => {
+    expect(breakdownNotice({ ...base, groupCount: 3, onlyUncategorized: false })).toBeNull();
+    expect(breakdownNotice({ ...base, groupCount: 1, grouped: true })).toBeNull();
+  });
+});
+
+describe('a report asked for an organizer that no longer exists', () => {
+  it('recognises the two fixed errors the API answers with', () => {
+    expect(isStaleOrganizerError('Unknown organizer or option')).toBe(true);
+    expect(isStaleOrganizerError('Not a select organizer')).toBe(true);
+    for (const other of [
+      undefined,
+      '',
+      'Invalid date',
+      'Invalid organizer filter',
+      'Access denied',
+    ]) {
+      expect(isStaleOrganizerError(other), String(other)).toBe(false);
+    }
+  });
+
+  it('reloads the organizers once, never twice in a row', () => {
+    expect(shouldRecoverFromStaleOrganizers('Unknown organizer or option', false)).toBe(true);
+    // The reload did not cure it: show the error instead of looping
+    expect(shouldRecoverFromStaleOrganizers('Unknown organizer or option', true)).toBe(false);
+    expect(shouldRecoverFromStaleOrganizers('Invalid date', false)).toBe(false);
+    expect(shouldRecoverFromStaleOrganizers(undefined, false)).toBe(false);
+  });
+
+  const select = (id: number, display_order = 0): OrganizerTypeWithOptions => ({
+    ...organizer(id, 'select', display_order),
+  });
+
+  it('keeps the grouping while its organizer exists and picks the default when it is gone', () => {
+    const list = [select(3, 2), select(5, 1), organizer(7, 'text', 0)];
+    expect(keepGroupBy(3, list)).toBe(3);
+    expect(keepGroupBy(9, list)).toBe(5);
+    // A text organizer cannot group
+    expect(keepGroupBy(7, list)).toBe(5);
+    expect(keepGroupBy(undefined, list)).toBe(5);
+    expect(keepGroupBy(3, [])).toBeUndefined();
   });
 });

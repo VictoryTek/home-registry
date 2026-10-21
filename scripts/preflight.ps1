@@ -270,7 +270,10 @@ if (Test-Path "frontend") {
 
 Write-Section "CONTAINER: Docker Multi-Stage Build"
 try {
-    docker build -t home-registry:preflight .
+    # --pull refreshes the base images. The date build argument makes the package-update layer in
+    # the Dockerfile rebuild at least daily (set APK_CACHE_BUST to force a refresh).
+    $apkCacheBust = if ($env:APK_CACHE_BUST) { $env:APK_CACHE_BUST } else { (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
+    docker build --pull --build-arg "APK_CACHE_BUST=$apkCacheBust" -t home-registry:preflight .
     if ($LASTEXITCODE -ne 0) {
         Write-Error-Exit "Docker build failed"
     }

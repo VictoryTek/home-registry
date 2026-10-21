@@ -254,8 +254,9 @@ Update base images in Dockerfile or pin specific versions. Check Trivy output fo
 ### "Docker build failed"
 Verify Dockerfile syntax and ensure all dependencies are available. Test build manually:
 ```bash
-docker build -t home-registry:test .
+docker build --pull --build-arg APK_CACHE_BUST=$(date -u +%F) -t home-registry:test .
 ```
+Without the date build argument, Docker caches the apk layer indefinitely and the image can keep outdated packages.
 
 ---
 

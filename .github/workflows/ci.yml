@@ -197,12 +197,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # A new date rebuilds the Dockerfile's package-update layer, so a cached layer cannot keep
+      # old packages for weeks
+      - name: Date for the package-update layer
+        id: cachebust
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Build Docker image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
           tags: home-registry:${{ github.sha }}
+          build-args: APK_CACHE_BUST=${{ steps.cachebust.outputs.date }}
           # Multi-layer cache: registry (fast reads) + GHA fallback (fork-compatible writes)
           cache-from: |
             type=registry,ref=ghcr.io/${{ steps.repo.outputs.name }}:buildcache

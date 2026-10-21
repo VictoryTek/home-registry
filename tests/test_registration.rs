@@ -1241,3 +1241,82 @@ async fn restoring_a_backup_never_makes_a_token_redeemable_again() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[actix_web::test]
+async fn restoring_a_backup_keeps_the_current_registration_mode() {
+    let (scratch, _admin, _) = scratch_with_admin().await;
+    let db = DatabaseService::new(scratch.pool.clone());
+    let dir = std::env::temp_dir().join(format!("hr_mode_backup_{}", Uuid::new_v4().simple()));
+
+    // (mode when the backup was taken, mode when it is restored): the restore never changes who
+    // may register, in either direction
+    for (at_backup, now) in [
+        ("open", "closed"),
+        ("open", "invite"),
+        ("closed", "open"),
+        ("invite", "closed"),
+    ] {
+        set_mode(&scratch.pool, at_backup).await;
+        let backup = create_backup_file(&db, "home_registry", &dir)
+            .await
+            .unwrap();
+        set_mode(&scratch.pool, now).await;
+
+        restore_backup_file(
+            &db,
+            &dir,
+            &backup.name,
+            &RestoreRequest {
+                restore_without_2fa: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            db.get_registration_mode().await.unwrap().as_str(),
+            now,
+            "backup taken in {at_backup} mode, restored in {now} mode"
+        );
+    }
+
+    // A server that has never had a mode chosen is invite only, so a backup that was open does
+    // not open it; the stored row from the backup is gone rather than carried over
+    set_mode(&scratch.pool, "open").await;
+    let backup = create_backup_file(&db, "home_registry", &dir)
+        .await
+        .unwrap();
+    scratch
+        .pool
+        .get()
+        .await
+        .unwrap()
+        .execute(
+            "DELETE FROM app_settings WHERE key = 'registration_mode'",
+            &[],
+        )
+        .await
+        .unwrap();
+    restore_backup_file(
+        &db,
+        &dir,
+        &backup.name,
+        &RestoreRequest {
+            restore_without_2fa: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(db.get_registration_mode().await.unwrap().as_str(), "invite");
+    assert_eq!(
+        count(
+            &scratch.pool,
+            "SELECT COUNT(*) FROM app_settings WHERE key = $1",
+            &"registration_mode"
+        )
+        .await,
+        0
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

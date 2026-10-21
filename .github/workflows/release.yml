@@ -91,12 +91,19 @@ jobs:
             type=raw,value=rc,enable=${{ contains(steps.version.outputs.version, 'rc') }}
             type=raw,value=latest,enable=${{ !contains(steps.version.outputs.version, 'beta') && !contains(steps.version.outputs.version, 'rc') }}
 
+      # A new date rebuilds the Dockerfile's package-update layer, so the registry cache cannot
+      # ship an image with weeks-old packages
+      - name: Date for the package-update layer
+        id: cachebust
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
+          build-args: APK_CACHE_BUST=${{ steps.cachebust.outputs.date }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

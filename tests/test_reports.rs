@@ -831,6 +831,51 @@ async fn invalid_dates_and_ranges_are_refused_on_every_report_endpoint() {
     }
 }
 
+#[actix_web::test]
+async fn dates_outside_years_1_to_9999_are_a_400_not_a_500() {
+    let d = seed().await;
+    let app = app!(d.pool());
+    // Years the date parser accepts but the database cannot store (or that are not ISO 8601
+    // years) used to reach the database and come back as a 500
+    for date in [
+        "99999-01-01",
+        "262000-01-01",
+        "-4800-01-01",
+        "-0001-01-01",
+        "0000-01-01",
+    ] {
+        for field in ["from_date", "to_date"] {
+            for path in [
+                "/api/reports/inventory",
+                "/api/reports/inventory/statistics",
+                "/api/reports/inventory/categories",
+            ] {
+                let (status, json, raw) = get!(
+                    &app,
+                    &format!("{path}?inventory_id={}&{field}={date}", d.inv),
+                    &d.jwt
+                );
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{path} {field}={date}: {raw}"
+                );
+                assert_eq!(json["success"], false);
+                assert!(!raw.contains(date), "the date is not repeated: {raw}");
+            }
+        }
+    }
+    // The first and last day of the range still work
+    for query in [
+        "&from_date=0001-01-01",
+        "&to_date=9999-12-31",
+        "&from_date=0001-01-01&to_date=9999-12-31",
+    ] {
+        let (status, _, raw) = get!(&app, &d.report(query), &d.jwt);
+        assert_eq!(status, StatusCode::OK, "{query}: {raw}");
+    }
+}
+
 // ---------------------------------------------------------------- access
 
 #[actix_web::test]

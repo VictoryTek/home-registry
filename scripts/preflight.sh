@@ -132,7 +132,10 @@ fi
 # ==============================================================================
 
 section "CONTAINER: Docker Multi-Stage Build"
-docker build -t home-registry:preflight . || error "Docker build failed"
+# --pull refreshes the base images. The date build argument makes the package-update layer in the
+# Dockerfile rebuild at least daily (APK_CACHE_BUST can be set to force a refresh).
+APK_CACHE_BUST="${APK_CACHE_BUST:-$(date -u +%Y-%m-%d)}"
+docker build --pull --build-arg "APK_CACHE_BUST=$APK_CACHE_BUST" -t home-registry:preflight . || error "Docker build failed"
 success "Docker build passed"
 
 section "CONTAINER: Trivy Security Scan"

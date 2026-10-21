@@ -82,7 +82,12 @@ export function ItemFilterBar({ filter, organizers, shown, total, onChange }: It
     });
   };
 
-  const clearAll = () => onChange({ ...filter, q: '', organizers: {} });
+  const clearAll = () => {
+    // Also drop what is typed but not yet written: its pending timer would write it back
+    written.current = '';
+    setDraft('');
+    onChange({ ...filter, q: '', organizers: {} });
+  };
 
   return (
     <div className="item-filter" role="search" aria-label="Search and filter items">

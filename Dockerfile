@@ -109,7 +109,13 @@ LABEL org.opencontainers.image.licenses="MIT"
 # - libgcc: Rust runtime support on musl/Alpine
 # - curl: used by HEALTHCHECK
 # OpenSSL is statically linked at build time — no libssl needed at runtime
-RUN apk update && \
+#
+# APK_CACHE_BUST: preflight and CI pass today's date (YYYY-MM-DD). A new value invalidates this
+# layer, so the package updates below are fetched again at least once a day instead of staying in
+# the build cache for weeks (a cached layer kept an old curl with known CVEs).
+ARG APK_CACHE_BUST=unset
+RUN echo "Package updates refreshed for: ${APK_CACHE_BUST}" && \
+    apk update && \
     apk upgrade --no-cache && \
     apk add --no-cache \
     ca-certificates \
